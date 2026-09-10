@@ -2,7 +2,7 @@
 
 This repo summarizes the disk format proposed for the CoCo community. The basic target is
 
-1. (Optional) Confidentiality and integrity protection.
+1. (Optional) Confidentiality and integrity protection. Optional as a pair: a volume may have neither, integrity alone, or both — but **never confidentiality without integrity**, because unauthenticated AES-XTS lets a host that can write the disk alter plaintext undetectably.
 2. Versatility. Means not only CoCo could use it, CVM scenarios w/o CoCo still works.
 3. Self-containerized. Metadata is transparent to users. The image describes how to interpret itself; it does **not** carry the key or the key locator, both of which come from the deployment.
 4. Out-of-box.

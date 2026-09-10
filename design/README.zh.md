@@ -22,8 +22,7 @@
 | **systemd-homed**（[HOME_DIRECTORY](https://systemd.io/HOME_DIRECTORY/)） | 最好的可移植 `GPT · LUKS2 · token` 镜像。元数据是桌面用户记录，不是 attestation + KBS。头仍可被 host 改。 |
 | **Clevis / systemd-cryptenroll** | 盘上写「密钥怎么取」，不是 CVM 卷镜像。 |
 | **cryptpilot** | 产品化的 CVM + KBS + 可选 integrity / verity。密钥 URI 和 verity root 在 **guest TOML / initrd**，磁盘不自描述（R2、R3）。 |
-| **CAA CSI + Kata #13638** | 能跑的 CoCo 路径。打开配置在 **宿主机 `mountInfo.json` 或 Trustee manifest**，不在镜像上。只有盘的 CVM 过不了 R2/R3。 |
-| **CDH #1648 / #1663**、**tdx-init** | 信封是对的（MAC + 分离打开 + fail-closed）。布局绑实现，不是可移植 GPT 镜像，也没有 verity 分区和 type UUID。 |
+| **tdx-init** | 信封是对的（MAC + 分离打开 + fail-closed）。布局绑实现，不是可移植 GPT 镜像，也没有 verity 分区和 type UUID。 |
 | **Constellation / Contrast / dstack** | 分离头 + JSON 白名单（或 MAC）。密钥在集群里，没有可移植规范。 |
 | **Azure / GCP / IBM SE / qcow2+LUKS** | 平台或虚拟镜像契约，不是随处可挂的 raw 卷。 |
 | **VeraCrypt、BitLocker、TCG Opal、ZFS、fscrypt、ocicrypt** | 数据面不对「`cryptsetup` + CDH `SecureMount`」（R4）。 |
@@ -44,7 +43,7 @@
 | `dm-verity` + 512 B superblock | [内核 dm-verity](https://docs.kernel.org/admin-guide/device-mapper/verity.html)；[cryptsetup wiki](https://gitlab.com/cryptsetup/cryptsetup/-/wikis/DMVerity) | 不可变只读树 |
 | 对明文头做 MAC | [Trail of Bits (2025-10-30)](https://blog.trailofbits.com/2025/10/30/vulnerabilities-in-luks2-disk-encryption-for-confidential-vms/)；[tdx-init v0.2.0](https://github.com/flashbots/tdx-init)；[CDH #1648](https://github.com/confidential-containers/guest-components/pull/1648) | 认证打开契约。两个先例都是对明文头做 MAC，而不是加密它 |
 | fail-closed 重开；解锁失败不 format | [CDH #1648](https://github.com/confidential-containers/guest-components/pull/1648) | 已有卷不能变成 from-scratch |
-| 持久 LUKS 的带日志 integrity | [CDH #1663](https://github.com/confidential-containers/guest-components/pull/1663) | 推荐的 RW 完整性配置 |
+| 持久 LUKS 的带日志 integrity | [CDH #1663](https://github.com/confidential-containers/guest-components/pull/1663) | **唯一**的机密 RW profile：加密永不脱离完整性单独提供（§5） |
 | 密钥定位符**不放**在盘上 | [libcryptsetup-token-kbs](https://github.com/MatiasVara/libcryptsetup-token-kbs)（优先用 SMBIOS 的 `initdata.toml` 而不是盘上字段）；[Kata #13638](https://github.com/kata-containers/kata-containers/issues/13638)（manifest URI 由被度量的 policy 授权） | §6.2：镜像带身份，部署带定位符 |
 | HKDF 拆根密钥 | 常规 KDF（[HKDF / RFC 5869](https://www.rfc-editor.org/rfc/rfc5869)） | `K_mac` 不能靠解析不可信 LUKS 头得来 |
 | 元数据代号计数器 | 常规的元数据版本化做法 | 拒绝在同一 `K_mac` 下被贴回来的旧 Contract（§8.4） |
@@ -153,7 +152,7 @@ mac = HMAC-SHA-256( K_mac,
   "format": "cdf/v1",
   "volume_uuid": "<与 superblock 相同>",
   "meta_generation": 1,
-  "profile": "plain" | "crypt" | "crypt+integrity" | "verity" | "verity+crypt",
+  "profile": "plain" | "crypt+integrity" | "verity" | "verity+crypt",
   "data": {
     "luks2_header_b64": "<分离的 LUKS2 头，若 profile 使用 LUKS>",
     "luks2_subsystem": "cdf-v1",
@@ -182,7 +181,7 @@ mac = HMAC-SHA-256( K_mac,
 -- profile plain
 P_data ::= Filesystem
 
--- profile crypt | crypt+integrity
+-- profile crypt+integrity
 P_data ::= Payload                        -- 没有现场 LUKS 头
            cryptsetup open --type luks2 --header H_ram P_data
            H_ram = decode(Contract.data.luks2_header_b64)
@@ -213,10 +212,13 @@ P_data   ::= DataBlocks | LUKS2_Payload
 | `profile` | 机密性 | 完整性 | 典型用途 |
 |-----------|--------|--------|----------|
 | `plain` | 无 | 无 | 非秘密划痕盘；仍可用 GPT 发现 |
-| `crypt` | LUKS2 | 无 | 可写秘密数据，无逐扇区标签 |
 | `crypt+integrity` | LUKS2 | `dm-integrity` | 默认机密 RW 卷 |
 | `verity` | 无 | 只读树 | 不可变公开镜像 |
 | `verity+crypt` | 先 LUKS2 再 verity | 两者 | 不可变秘密镜像 |
+
+**加密就必须配完整性。** 这里没有「只加密」的 profile，实现也不得自行加一个。`dm-crypt` 的 AES-XTS 保长且不认证：能写这个设备的 host 就能以 16 字节块为粒度改动明文，盲改但可重复，而 guest 会毫无征兆地接受结果。既然本格式的全部前提就是「host 能写」，那么「只加密」的 profile 就是一个看着受保护、实际不受保护的档位。这个蕴含是单向的：`verity` 提供「只有完整性、没有机密性」，那是一种正当配置。
+
+因此，符合规范的打开方必须拒绝「`profile` 只声明加密而不含完整性」的 Contract，即使 MAC 校验通过——那个取值不在枚举内，而把它当成 `crypt+integrity` 会悄悄改变「被认证的到底是什么」。
 
 除 `plain` 之外的每个 profile 都必须置位 `flags.AUTHENTICATED`：`verity` 虽然不含秘密，但同样需要一个被认证的 root hash。`plain` 没有密钥，因此没有 MAC，打开方必须把它当成普通的无保护分区。
 
@@ -427,7 +429,7 @@ mount -o ro /dev/mapper/cdf-data /mnt/data                     # 只有第 2 步
 | 换成另一张用**同一把** `K_root` 封过的 CDF 盘 | MAC 可能成功 | 每个 `volume_uuid` 一把 `K_root`；部署侧核对预期 UUID |
 | 把**整个镜像**换成更旧的自洽副本 | 会被接受；标签和 MAC 都能过 | **不在范围内**（§3）。需要外部新鲜度锚点 |
 | 读取 Contract | 按设计就是能读 | 里面没有秘密（§7.1）；载荷仍然是加密的 |
-| 翻转密文扇区 | 仅当 `crypt+integrity` / verity 时能发现 | 选对 profile |
+| 翻转密文扇区 | **每一个**机密 profile 都能发现 | 由 §5 保证：没有任何 profile 只加密不做完整性。只有 `plain` 发现不了，而它本来什么都不声称 |
 
 ---
 
@@ -439,7 +441,7 @@ mount -o ro /dev/mapper/cdf-data /mnt/data                     # 只有第 2 步
 2. 用 HKDF 得到的 `K_mac` 做 HMAC-SHA-256 认证 Contract，覆盖范围是「`mac` 置零的 Superblock」后接「恰好 `contract_size` 字节的 Contract」，并用常数时间比较。
 3. 在比较成功之前，除了用于查密钥的 `volume_uuid`，不使用 Contract 的任何字段。
 4. 只用校验通过的 Contract 里的头做 `--header` 打开 LUKS2。
-5. 即使 MAC 通过，也拒绝空算法 / 非白名单 cipher。
+5. 即使 MAC 通过，也拒绝空算法 / 非白名单 cipher，并拒绝任何「只加密不做完整性」的 `profile`（§5）。
 6. 除 §8.2 外永不 format，且绝不因为校验失败而 format。
 7. 「必须被认证」和「只读还是读写」取自部署侧，而不是镜像。
 8. 盘上不存密钥定位符（§6.2）。

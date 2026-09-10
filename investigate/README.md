@@ -18,12 +18,16 @@
 
 The repository goal "optional confidentiality and integrity" is really a choice of device-mapper stack. Spelling the modes out first, because which modes are in scope decides whether a new partition layout is needed at all (§1.3).
 
-| Mode | Device-mapper stack | Mutability | Extra on-disk area | Confidentiality & Integrity |
-|------|---------------------|------------|--------------------| --- |
-| `plain` | none | RW | none | none |
-| `crypt+integrity` | `dm-integrity` → `dm-crypt` | RW | none (tags/journal are in-band, `cryptsetup --integrity`) | Both |
-| `verity` | `dm-verity` | **RO** | **hash tree** (separate partition, or a hash offset on the same device) | Only Integrity |
-| `verity+crypt` | `dm-crypt` → `dm-verity` | **RO** | same as `verity` | Both |
+| Mode | Device-mapper stack | Mutability | Extra on-disk area | Confidentiality | Integrity |
+|------|---------------------|------------|--------------------|-----------------|-----------|
+| `plain` | none | RW | none | no | no |
+| `crypt+integrity` | `dm-integrity` → `dm-crypt` | RW | none (tags/journal are in-band, `cryptsetup --integrity`) | yes | **RW integrity** |
+| `verity` | `dm-verity` | **RO** | **hash tree** (separate partition, or a hash offset on the same device) | no | **RO integrity** |
+| `verity+crypt` | `dm-crypt` → `dm-verity` | **RO** | same as `verity` | yes | **RO integrity** |
+
+**Encryption implies integrity: there is deliberately no encryption-only mode.** `dm-crypt` with AES-XTS is length-preserving and unauthenticated, so a host that can write the device can alter plaintext — per 16-byte block, blindly but repeatably — and the guest accepts the result with no signal at all. In a threat model whose entire premise is a host that can write, offering confidentiality without integrity would be offering a mode that looks protected and is not. So every confidential mode here is paired with integrity: RW pairs with `dm-integrity` tags, RO with `dm-verity`. The implication is one-way — integrity *without* confidentiality stays available as `verity`, for an immutable public image.
+
+**Both integrity kinds are in scope, and they are not interchangeable.** RW integrity is entirely in-band: `cryptsetup --integrity` puts tags and a journal inside the same device, so it needs no new on-disk area and no new metadata. RO integrity needs two things LUKS2 has nowhere to put: a **second extent** for the hash tree, and an **authenticated root hash** (plus salt and block geometry) that must arrive from outside the tree it validates. That asymmetry decides the layout question (§1.3), and it is what disqualifies the otherwise-closest surveyed class (§6.3).
 
 ### 1.2 Requirements
 
@@ -43,7 +47,7 @@ R5 was implicit in the original goal list. It is called out because it, not encr
 
 | If the scope is… | Then structurally you need… | Why |
 |------------------|------------------------------|-----|
-| `crypt` and `crypt+integrity` only (no RO integrity) | **nothing beyond LUKS2** | Both stacks are in-band: the LUKS2 header describes the cipher, and `--integrity` puts tags + journal inside the same device. Any extra metadata fits in `tokens`. |
+| `crypt+integrity` only (no RO integrity) | **nothing beyond LUKS2** | Both stacks are in-band: the LUKS2 header describes the cipher, and `--integrity` puts tags + journal inside the same device. Any extra metadata fits in `tokens`. |
 | …plus R5 | LUKS2 **plus one authenticated anchor** | The anchor cannot be a plain token: a MAC over the header cannot live inside the header it covers. Options: a small MAC region on the device (tdx-init, CDH #1648), a detached header held off the untrusted device, or a header digest bound into the KBS release policy. None of these requires a partition table. |
 | …plus `verity` / `verity+crypt` | a **hash area**, and in practice a **partition map** | A verity hash tree is a second object with its own size and root hash. It can live at a hash offset on the same device (`veritysetup --hash-offset`), but then offsets become private convention. GPT type UUIDs make the roles discoverable, which is the R2/R3 argument for `GPT(meta, [verity], data)`. |
 
@@ -118,7 +122,7 @@ The LUKS2 specification itself states that its checksum and redundancy cover *ra
 | Closest “self-describing portable image” | [systemd-homed](https://systemd.io/HOME_DIRECTORY/): `GPT · LUKS2 · token(encrypted user record)`. Closest “attestation + KBS on disk”: [libcryptsetup-token-kbs](https://github.com/MatiasVara/libcryptsetup-token-kbs) (`tokens[i].type = "kbs"`). Neither provides a GPT meta + verity + authenticated-profile image. |
 | Closest productized CoCo/CVM data-volume stack | [cryptpilot](https://github.com/openanolis/cryptpilot): LUKS2 + optional `dm-integrity` + Trustee/KBS. **Key URI lives in guest TOML**, not in an authenticated on-image object. FDE verity root hash lives in **initrd**, not in a disk meta partition. |
 | CoCo persistent storage is still converging | CAA CSI passes `encrypt-type` / `kbs-key-id` in **host** `mountInfo.json`. [guest-components #1648](https://github.com/confidential-containers/guest-components/pull/1648) / [#1663](https://github.com/confidential-containers/guest-components/pull/1663) add an authenticated LUKS envelope + integrity. [Kata #13638](https://github.com/kata-containers/kata-containers/issues/13638) proposes putting the profile in a **Trustee manifest**, not on the disk. |
-| A new GPT three-partition image is **not** forced by missing encryption | It is forced only if we require (R2)+(R3): layout, verity root, and authenticated open parameters to travel **with the image**, independently of Kata, CSI, and guest config. No surveyed project publishes that as a stable spec. |
+| A new GPT three-partition image is **not** forced by missing encryption | Confidentiality alone needs nothing new. What forces it is **read-only integrity** (a hash tree is a second extent, and its root hash must be recorded somewhere authenticated) together with (R2)+(R3): those parameters must travel **with the image**, independently of Kata, CSI, and guest config. See §6.3. No surveyed project publishes that as a stable spec. |
 
 **Recommendation for the next step in this repo.** Treat LUKS2 + `dm-integrity` + `dm-verity` as the **data-plane** primitives (R4). Specify a **thin, authenticated envelope** (either a GPT `P_meta` or a CDH-style header MAC region) that carries the open profile (R2, R3, R5), and keep the key locator off the image entirely (R3). Authentication is enough: the envelope holds no secret, so a MAC beats an AEAD here. Do not attempt device-level freshness on the disk, and do not invent a new cipher suite or a cryptsetup-incompatible payload.
 
@@ -387,7 +391,9 @@ Open      ::=  verify Envelope in guest RAM
 0           512
 ```
 
-**Properties.** **R5 is satisfied** — this is the only class that authenticates the contract on its own. R4 holds: the payload is still opened by `cryptsetup`. CDH's crash state additionally makes reopen fail-closed, which is about crash consistency, not freshness. **R2/R3 remain weak**: the region is at a private offset with no type UUID, so a generic agent cannot discover it, and there is no place for a verity tree.
+**Properties.** **R5 is satisfied** — this is the only class that authenticates the contract on its own. R4 holds: the payload is still opened by `cryptsetup`. CDH's crash state additionally makes reopen fail-closed, which is about crash consistency, not freshness. **R2/R3 remain weak**: the region is at a private offset with no type UUID, so a generic agent cannot discover it.
+
+**Why it cannot be adopted as-is.** This class covers `crypt+integrity` completely — RW integrity is in-band, and CDH #1663's journaled `hmac-sha256` is what this repo ends up specifying. It covers **`verity` and `verity+crypt` not at all.** The envelope is by definition a MAC over a *LUKS2 header*, and a LUKS2 header has no field for a verity root hash and no second extent for a hash tree; none of the three members defines one. Adding them means adding discoverable extents and an authenticated place to record their geometry, which is Class M. Full argument in §6.3.
 
 ---
 
@@ -489,20 +495,24 @@ Intent again: `GPT(P_meta_MAC, [P_verity], P_data_LUKS2[+integrity])`; Trustee h
 | **mitigated: MAC + detached** | ToB preferred. Header bytes are authenticated with a key the host does not hold; `open --header` uses that copy. |
 | **n/a** | Not a LUKS2 open contract (different trust root). |
 
-**By class** — the properties are class properties, so this is the table that matters:
+### 6.1 By class
 
-| Class | Conf. | Integrity | Open contract on the image? | Portable (R2/R3) | Authenticated contract (R5) |
-|-------|-------|-----------|-----------------------------|------------------|-----------------------------|
-| **L** stock LUKS2, contract in header | yes | optional `dm-integrity` | yes — header / `tokens`, **unauthenticated** | partial: needs a plugin or a known token type | **no** — SHA-256 csum ≠ MAC |
-| **C** stock LUKS2, contract off-image | yes | optional | **no** | **no** — the profile does not travel | retrofitted in the open path (detached + allow-list) |
-| **E** LUKS2 + authenticated region | yes | header MAC + optional integrity | yes, at a **private offset** | weak: no type UUID, not discoverable | **yes** |
-| **M** multi-partition image | yes | verity + optional integrity | yes, **discoverable**; authenticated only if M + E | yes | only if combined with E |
-| **P** platform contract | yes | platform | n/a — cloud API | no | platform-internal |
-| **X** non-LUKS formats | yes | varies | yes (own header) | fails R4 | varies |
+The properties are class properties, so this is the table that matters. The two integrity kinds of §1.1 are separate columns, because that is where the classes actually diverge; the last column is the verdict.
+
+| Class | RW integrity | RO integrity (`dm-verity`) | Open contract on the image? | Portable (R2/R3) | Authenticated contract (R5) | **Why it cannot be used as-is** |
+|-------|--------------|----------------------------|-----------------------------|------------------|-----------------------------|---------------------------------|
+| **L** stock LUKS2, contract in header | yes — in-band `dm-integrity` | **no** — LUKS2 has no field for a root hash and no second extent for a hash tree | yes — header / `tokens`, **unauthenticated** | partial: needs a plugin or a known token type | **no** — SHA-256 csum ≠ MAC | Two independent failures: the contract is host-writable (R5), and RO integrity cannot be expressed at all (R1) |
+| **C** stock LUKS2, contract off-image | yes | **no** — same as L | **no** | **no** — the profile does not travel | retrofitted in the open path (detached + allow-list) | The image does not describe itself (R2/R3), and RO integrity still has nowhere to live (R1) |
+| **E** LUKS2 + authenticated region | yes — CDH #1663 journals `hmac-sha256` | **no** — the envelope authenticates *a LUKS2 header*; no root-hash field, no defined hash-tree area | yes, at a **private offset** | weak: no type UUID, not discoverable | **yes** | **RO integrity is unreachable** (R1) and the region is undiscoverable (R2/R3). Both fixes require a role map — which is Class M. See §6.3 |
+| **M** multi-partition image | yes | **yes** — a partition can hold the tree, and `P_meta` can hold the root hash | yes, **discoverable**; authenticated only if M + E | yes | only if combined with E | Nothing structural, but the contract is unauthenticated (R5) in every published member, so M alone is still not usable |
+| **P** platform contract | platform | platform | n/a — cloud API | no | platform-internal | Not a portable image format at all (R2) |
+| **X** non-LUKS formats | varies | varies | yes (own header) | fails R4 | varies | Wrong data plane: not openable by stock `cryptsetup` (R4) |
 
 No class provides device-level freshness; see §1.2.
 
-**By project**, ordered as in §5:
+### 6.2 By project
+
+Ordered as in §5:
 
 | Project | Class | Integrity | Key / policy location | LUKS2 header replace (ToB)? |
 |---------|-------|-----------|------------------------|------------------------------|
@@ -524,6 +534,23 @@ No class provides device-level freshness; see §1.2.
 | cryptpilot FDE | M | verity + optional integrity | KBS + verity root in **initrd** | **yes** on its LUKS volumes; the verity path is a different bug |
 | Azure Conf. OS disk | P | platform | AKV + attestation | **n/a** for the platform disk; **yes** if the guest stacks LUKS2 |
 | **CDF v1 (this repo)** | **M + E** | optional verity + integrity | locator from the trusted channel; **no locator on the image** | **mitigated** — MAC over the open contract + detached `open` |
+
+### 6.3 Why the two closest classes still cannot be adopted
+
+Four of the six classes are ruled out quickly: **P** is not a portable image, **X** is the wrong data plane (R4), and **L** / **C** cannot authenticate the open contract (R5) — that much is the Trail of Bits result. The interesting cases are **E** and **M**, because each already solves what the other lacks, and neither is short of a small patch.
+
+**Class E** is the only class that satisfies R5 on its own, so it is the natural candidate for "just use this". It fails on **read-only integrity**:
+
+1. **The envelope is defined as a MAC over a LUKS2 header, and a LUKS2 header cannot describe a verity volume.** RO integrity introduces two objects with no home: the hash tree, which is a second extent with its own size, and the root hash together with salt, hash algorithm, and the two block sizes, which must arrive authenticated from outside the tree it validates. None of tdx-init, CDH #1648/#1663, or Salmiac defines a field for either — they were designed to fix header forgery, not to describe a second protection mode.
+2. **`veritysetup --hash-offset` is not a way out.** The tree can technically live at an offset on the same device, but then the format has a private offset for the envelope *and* a private offset for the tree, and still nowhere authenticated to record the root hash. Two undiscoverable conventions instead of one.
+3. **Its RW half is fine, and is adopted rather than rejected.** CDH #1663's journaled `hmac-sha256` is precisely what this repo specifies for `crypt+integrity`. The gap is exactly the read-only half of §1.1 — which is why adding RO integrity to the scope, and not anything about encryption, is what disqualifies the class.
+4. **The envelope is also undiscoverable.** A fixed offset with no type UUID means a generic agent cannot distinguish an enveloped device from a damaged LUKS2 device, which is the "looks like LUKS, else format" bug in §5.2 with a sharper edge.
+
+Both (1) and (4) are fixed by the same thing: extents with discoverable roles and an authenticated place to record their parameters. That is the definition of Class M. So Class E cannot be *extended* into the answer without becoming M + E.
+
+**Class M** is the mirror image. It has room for the hash tree and somewhere to put the root hash, so it can express every mode in §1.1 — but a partition table is only discovery, not authenticity. Both published members prove it: systemd-homed's threat model has no malicious host, and cryptpilot FDE keeps its verity root in the initrd rather than in an authenticated on-image object, so it fails R3 for exactly the mode under discussion.
+
+**Hence the conclusion.** RO integrity forces M; R5 forces E; nothing surveyed is both. CDF v1 is therefore specified as M + E — a discoverable role map whose metadata partition is authenticated with a key the host does not hold.
 
 ---
 

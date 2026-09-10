@@ -22,8 +22,7 @@ No surveyed format satisfies all of them. In the survey's taxonomy ([§5](../inv
 | **systemd-homed** ([HOME_DIRECTORY](https://systemd.io/HOME_DIRECTORY/)) | Best portable `GPT · LUKS2 · token` image. Metadata is a desktop user record, not attestation + KBS. Header still host-malleable. |
 | **Clevis / systemd-cryptenroll** | On-disk “how to get the key”, not a CVM volume image. |
 | **cryptpilot** | Productized CVM + KBS + optional integrity / verity. Key URI and verity root live in **guest TOML / initrd**, so the disk is not self-describing (R2, R3). |
-| **CAA CSI + Kata #13638** | Working CoCo path. Open profile lives in **host `mountInfo.json` or a Trustee manifest**, not on the image. Fails R2/R3 for a CVM that only has the disk. |
-| **CDH #1648 / #1663**, **tdx-init** | Correct envelope (MAC + detached open + fail-closed). Implementation-specific layout, not a portable GPT image, no verity partition or type UUIDs. |
+| **tdx-init** | Correct envelope (MAC + detached open + fail-closed). Implementation-specific layout, not a portable GPT image, no verity partition or type UUIDs. |
 | **Constellation / Contrast / dstack** | Detached header + JSON allow-list (or MAC). Cluster-local keys, no portable spec. |
 | **Azure / GCP / IBM SE / qcow2+LUKS** | Platform or VM-image contracts, not a raw volume you can attach anywhere. |
 | **VeraCrypt, BitLocker, TCG Opal, ZFS, fscrypt, ocicrypt** | Wrong data plane for “`cryptsetup` + CDH `SecureMount`” (R4). |
@@ -44,7 +43,7 @@ No surveyed format satisfies all of them. In the survey's taxonomy ([§5](../inv
 | `dm-verity` + 512 B superblock | [kernel dm-verity](https://docs.kernel.org/admin-guide/device-mapper/verity.html); [cryptsetup wiki](https://gitlab.com/cryptsetup/cryptsetup/-/wikis/DMVerity) | Immutable RO tree |
 | MAC over the header, cleartext header | [Trail of Bits (2025-10-30)](https://blog.trailofbits.com/2025/10/30/vulnerabilities-in-luks2-disk-encryption-for-confidential-vms/); [tdx-init v0.2.0](https://github.com/flashbots/tdx-init); [CDH #1648](https://github.com/confidential-containers/guest-components/pull/1648) | Authenticate the open contract. Both precedents MAC a cleartext header rather than encrypting it |
 | Fail-closed reopen; no format-on-unlock-failure | [CDH #1648](https://github.com/confidential-containers/guest-components/pull/1648) | Existing volumes must not become from-scratch |
-| Journaled integrity for persistent LUKS | [CDH #1663](https://github.com/confidential-containers/guest-components/pull/1663) | Recommended RW integrity profile |
+| Journaled integrity for persistent LUKS | [CDH #1663](https://github.com/confidential-containers/guest-components/pull/1663) | The **only** confidential RW profile: encryption is never offered without integrity (§5) |
 | Key locator kept **off** the image | [libcryptsetup-token-kbs](https://github.com/MatiasVara/libcryptsetup-token-kbs) (SMBIOS `initdata.toml` preferred over on-disk fields); [Kata #13638](https://github.com/kata-containers/kata-containers/issues/13638) (manifest URI in measured policy) | §6.2: the image carries identity, the deployment carries the locator |
 | HKDF-split root key | Common KDF practice ([HKDF / RFC 5869](https://www.rfc-editor.org/rfc/rfc5869)) | `K_mac` must not be derived by parsing an untrusted LUKS header |
 | Metadata generation counter | Ordinary versioned-metadata practice | Reject a stale Contract re-pasted under the same `K_mac` (§8.4) |
@@ -153,7 +152,7 @@ Covering the whole superblock authenticates `volume_uuid`, `flags`, `meta_genera
   "format": "cdf/v1",
   "volume_uuid": "<same as superblock>",
   "meta_generation": 1,
-  "profile": "plain" | "crypt" | "crypt+integrity" | "verity" | "verity+crypt",
+  "profile": "plain" | "crypt+integrity" | "verity" | "verity+crypt",
   "data": {
     "luks2_header_b64": "<detached LUKS2 header, if profile uses LUKS>",
     "luks2_subsystem": "cdf-v1",
@@ -182,7 +181,7 @@ Covering the whole superblock authenticates `volume_uuid`, `flags`, `meta_genera
 -- profile plain
 P_data ::= Filesystem
 
--- profile crypt | crypt+integrity
+-- profile crypt+integrity
 P_data ::= Payload                        -- NO live LUKS header
            cryptsetup open --type luks2 --header H_ram P_data
            H_ram = decode(Contract.data.luks2_header_b64)
@@ -213,10 +212,13 @@ Default LUKS2 parameters when `profile` includes `crypt`:
 | `profile` | Confidentiality | Integrity | Typical use |
 |-----------|-----------------|-----------|-------------|
 | `plain` | none | none | Non-secret scratch; still GPT-discoverable |
-| `crypt` | LUKS2 | none | RW secret data, no per-sector tags |
 | `crypt+integrity` | LUKS2 | `dm-integrity` | Default confidential RW volume |
 | `verity` | none | read-only tree | Immutable public image |
 | `verity+crypt` | LUKS2 then verity | both | Immutable secret image |
+
+**Encryption implies integrity.** There is no encryption-only profile, and an implementation MUST NOT add one. `dm-crypt` with AES-XTS is length-preserving and unauthenticated: a host that can write the device can alter plaintext at 16-byte-block granularity, blindly but repeatably, and the guest accepts the result with no signal. Since the whole premise of this format is a host that can write, an encryption-only profile would be a mode that looks protected and is not. The implication is one-way: `verity` gives integrity without confidentiality, which is a legitimate configuration.
+
+Consequently a conforming opener MUST refuse a Contract whose `profile` names encryption without integrity, even if the MAC verifies — the value is outside the enum, and treating it as `crypt+integrity` would silently change what was authenticated.
 
 `flags.AUTHENTICATED` MUST be set for every profile except `plain`: `verity` needs an authenticated root hash even though it holds no secret. `plain` has no key, therefore no MAC, and an opener MUST treat it as an ordinary unprotected partition.
 
@@ -427,7 +429,7 @@ The locator comes from whichever of those two paths exists; the image never prov
 | Swap a **whole** other CDF disk minted under the same `K_root` | MAC can succeed | One `K_root` per `volume_uuid`; deployment checks the expected UUID |
 | Restore an older consistent copy of the **whole** image | Accepted; tags and MAC both verify | **Out of scope** (§3). Needs an external freshness anchor |
 | Read the Contract | Succeeds by design | Nothing in it is secret (§7.1); the payload stays encrypted |
-| Flip ciphertext sectors | Detected iff `crypt+integrity` / verity | Choose the right profile |
+| Flip ciphertext sectors | Detected in **every** confidential profile | Guaranteed by §5: no profile encrypts without integrity. Undetected only in `plain`, which claims nothing |
 
 ---
 
@@ -439,7 +441,7 @@ An implementation is CDF v1 conformant if it:
 2. Authenticates the Contract with HMAC-SHA-256 under HKDF-derived `K_mac`, over the zero-`mac` Superblock followed by exactly `contract_size` Contract bytes, compared in constant time.
 3. Uses no field of the Contract before that comparison succeeds, apart from `volume_uuid` for the key lookup.
 4. Opens LUKS2 only via `--header` from the verified Contract.
-5. Refuses null / non-allow-listed ciphers even after the MAC verifies.
+5. Refuses null / non-allow-listed ciphers even after the MAC verifies, and refuses any `profile` that encrypts without integrity (§5).
 6. Never formats except under §8.2, and never in response to a verification failure.
 7. Takes "must be authenticated" and "read-only vs read-write" from the deployment, not from the image.
 8. Stores no key locator on the image (§6.2).
