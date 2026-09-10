@@ -11,3 +11,10 @@ This repo summarizes the disk format proposed for the CoCo community. The basic 
 Explicitly **out of scope**: freshness of the whole device. A host that restores an older, internally consistent copy of the image defeats every on-disk check, because it rolls back the evidence together with the data. Detecting that needs mutable state outside the disk, so it belongs to the deployment rather than to the format. See [investigate/README.md §1.2](investigate/README.md).
 
 The survey of existing formats is in [investigate/README.md](investigate/README.md) ([中文](investigate/README.zh.md)). No existing standard meets all five goals. The format specified here is **CDF v1**: [design/README.md](design/README.md) ([中文](design/README.zh.md)).
+
+## AI Helped
+
+The Data collection and most word work are helped with AI. But the core idea, the basic logic as following are enforced by human being.
+1. Avoid re-inventing the wheels if possible. A data collection upon open-source is needed.
+2. Make clear what we need. Basic requirements in google doc and also RO+integrity volumes.
+3. Final design. AI helps to do word work.
