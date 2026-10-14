@@ -28,6 +28,8 @@ pub struct CreateArgs {
     pub key_file: Option<String>,
     pub force: bool,
     pub from_image: Option<PathBuf>,
+    /// Optional on-disk Contract.key_locator hint (e.g. kbs:///…).
+    pub key_locator: Option<String>,
 }
 
 pub struct InfoArgs {
@@ -108,7 +110,10 @@ pub fn cmd_create(args: CreateArgs) -> Result<()> {
                      (pass --force to re-format)"
                 );
             }
-            eprintln!("warning: --force: destroying existing CDF layout on {}", args.disk.display());
+            eprintln!(
+                "warning: --force: destroying existing CDF layout on {}",
+                args.disk.display()
+            );
         }
 
         let layout = gpt_layout::create_partitions(&handle.block_dev, args.profile)?;
@@ -118,12 +123,16 @@ pub fn cmd_create(args: CreateArgs) -> Result<()> {
             args.profile,
             &root,
             args.from_image.as_deref(),
+            args.key_locator.clone(),
         )?;
         println!("created CDF image");
         println!("  disk:          {}", args.disk.display());
         println!("  block:         {}", handle.block_dev.display());
         println!("  profile:       {}", args.profile);
         println!("  access_mode:   {}", args.profile.access_mode());
+        if let Some(loc) = &args.key_locator {
+            println!("  key_locator:   {loc}");
+        }
         println!("  meta:          {}", disc.meta.display());
         if let Some(v) = &disc.verity {
             println!("  verity:        {}", v.display());
@@ -192,8 +201,7 @@ pub fn cmd_info(args: InfoArgs) -> Result<()> {
             Ok((sb, contract_bytes, contract)) => {
                 // Trust label depends on whether we verified the MAC.
                 let (trust, mac_status) = if args.key.is_some() || args.key_file.is_some() {
-                    let root =
-                        ensure_key_material(args.key.as_deref(), args.key_file.as_deref())?;
+                    let root = ensure_key_material(args.key.as_deref(), args.key_file.as_deref())?;
                     let (k_mac, _) = root.derive(sb.volume_uuid.as_bytes())?;
                     if verify_mac(&k_mac, &sb, &contract_bytes) {
                         ("MAC verified — trusted", "OK")
@@ -201,17 +209,11 @@ pub fn cmd_info(args: InfoArgs) -> Result<()> {
                         ("MAC FAILED — untrusted", "FAIL")
                     }
                 } else {
-                    (
-                        "untrusted until MAC verifies (pass --key)",
-                        "skipped",
-                    )
+                    ("untrusted until MAC verifies (pass --key)", "skipped")
                 };
 
                 println!("superblock:      ({trust})");
-                println!(
-                    "  version:       {}.{}",
-                    sb.version_major, sb.version_minor
-                );
+                println!("  version:       {}.{}", sb.version_major, sb.version_minor);
                 println!("  volume_uuid:   {}", sb.volume_uuid);
                 println!(
                     "  flags:         {:#x} ({})",
@@ -227,6 +229,10 @@ pub fn cmd_info(args: InfoArgs) -> Result<()> {
                 println!(
                     "  access_mode:   {} (from profile)",
                     contract.profile.access_mode()
+                );
+                println!(
+                    "  key_locator:   {}",
+                    contract.key_locator.as_deref().unwrap_or("(none)")
                 );
                 println!("  integrity:     {}", contract.data.integrity);
                 println!("  cipher:        {}", contract.data.cipher);
@@ -262,9 +268,8 @@ pub fn cmd_open(args: OpenArgs) -> Result<()> {
     }
 
     let outcome = (|| {
-        let disc = gpt_layout::discover(&handle.block_dev).context(
-            "not a CDF disk (no CDF GPT partitions); run `create` first",
-        )?;
+        let disc = gpt_layout::discover(&handle.block_dev)
+            .context("not a CDF disk (no CDF GPT partitions); run `create` first")?;
         let (sb, contract_bytes, contract) = read_meta(&disc.meta).context(
             "CDF partitions found but Superblock/Contract unreadable; \
              refusing to open (use `create --force` to re-format if intentional)",
@@ -321,8 +326,8 @@ fn cdf_already_present(block_dev: &Path) -> Result<bool> {
         Ok(d) => d,
         Err(_) => return Ok(false),
     };
-    let mut f = std::fs::File::open(&disc.meta)
-        .with_context(|| format!("open {}", disc.meta.display()))?;
+    let mut f =
+        std::fs::File::open(&disc.meta).with_context(|| format!("open {}", disc.meta.display()))?;
     let mut magic = [0u8; 8];
     match f.read_exact(&mut magic) {
         Ok(()) => Ok(magic == *MAGIC),
@@ -419,6 +424,7 @@ fn format_and_seal(
     profile: Profile,
     root: &RootKey,
     from_image: Option<&Path>,
+    key_locator: Option<String>,
 ) -> Result<()> {
     let volume_uuid = Uuid::new_v4();
     let (k_mac, k_luks) = root.derive(volume_uuid.as_bytes())?;
@@ -429,9 +435,12 @@ fn format_and_seal(
     )?;
 
     let luks_header = match profile {
-        Profile::CryptIntegrity => {
-            Some(luks_format_detached(&disc.data, &k_luks, &volume_uuid, profile)?)
-        }
+        Profile::CryptIntegrity => Some(luks_format_detached(
+            &disc.data,
+            &k_luks,
+            &volume_uuid,
+            profile,
+        )?),
         Profile::VerityCrypt => {
             let from = from_image.context("verity+crypt requires --from-image")?;
             let header = luks_format_detached(&disc.data, &k_luks, &volume_uuid, profile)?;
@@ -465,6 +474,7 @@ fn format_and_seal(
         &k_mac,
         luks_header.as_deref(),
         verity,
+        key_locator,
     )?;
     eprintln!("sealed volume_uuid={volume_uuid} profile={profile} generation=1");
     Ok(())
@@ -488,9 +498,8 @@ fn populate_luks_payload(
 }
 
 fn copy_image_to_dev(from: &Path, dest: &Path) -> Result<()> {
-    let src_len = device_size_bytes(from).or_else(|_| {
-        Ok::<u64, anyhow::Error>(std::fs::metadata(from)?.len())
-    })?;
+    let src_len = device_size_bytes(from)
+        .or_else(|_| Ok::<u64, anyhow::Error>(std::fs::metadata(from)?.len()))?;
     let dst_len = device_size_bytes(dest)?;
     if src_len > dst_len {
         bail!(
@@ -508,16 +517,13 @@ fn copy_image_to_dev(from: &Path, dest: &Path) -> Result<()> {
         dest.display()
     );
     // Prefer dd for sparse-friendly block copies.
-    run_checked(
-        &mut Command::new("dd")
-            .args([
-                &format!("if={}", from.display()),
-                &format!("of={}", dest.display()),
-                "bs=4M",
-                "conv=fsync",
-                "status=none",
-            ]),
-    )?;
+    run_checked(&mut Command::new("dd").args([
+        &format!("if={}", from.display()),
+        &format!("of={}", dest.display()),
+        "bs=4M",
+        "conv=fsync",
+        "status=none",
+    ]))?;
     Ok(())
 }
 
@@ -642,10 +648,7 @@ fn activate(
         Profile::Plain => Ok(disc.data.display().to_string()),
         Profile::CryptIntegrity => open_luks(disc, contract, k_luks, mapper, cleanup),
         Profile::Verity => {
-            let verity_dev = disc
-                .verity
-                .as_ref()
-                .context("missing verity partition")?;
+            let verity_dev = disc.verity.as_ref().context("missing verity partition")?;
             let v = contract
                 .verity
                 .as_ref()
@@ -662,10 +665,7 @@ fn activate(
             Ok(format!("/dev/mapper/{mapper}"))
         }
         Profile::VerityCrypt => {
-            let verity_dev = disc
-                .verity
-                .as_ref()
-                .context("missing verity partition")?;
+            let verity_dev = disc.verity.as_ref().context("missing verity partition")?;
             let v = contract
                 .verity
                 .as_ref()

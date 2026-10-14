@@ -56,6 +56,10 @@ enum Cmd {
         /// Final payload image for verity / verity+crypt (copied into P_data before seal).
         #[arg(long)]
         from_image: Option<PathBuf>,
+        /// Optional Contract.key_locator hint (e.g. kbs:///default/cdf/orders-db).
+        /// Deployment-supplied locators always override this field.
+        #[arg(long)]
+        key_locator: Option<String>,
     },
     /// Open a sealed CDF volume (verify MAC, map to dm). Never formats.
     Open {
@@ -84,6 +88,7 @@ fn main() -> Result<()> {
             key_file,
             force,
             from_image,
+            key_locator,
         } => ops::cmd_create(ops::CreateArgs {
             disk: cli.disk,
             profile: Profile::parse(&profile)?,
@@ -92,6 +97,7 @@ fn main() -> Result<()> {
             key_file,
             force,
             from_image,
+            key_locator,
         }),
         Cmd::Open {
             key,

@@ -73,6 +73,18 @@ for broader use cases.
 
 A common question is whether GPT adds attack surface that the LUKS-only envelope does not. The storage adversary already rewrites every byte. Forging GPT is equivalent to pointing the opener at the wrong extents; the open path must refuse until the contract MAC verifies, and must not take device-mapper parameters from the table. That is the same fail-closed rule as MAC + detached LUKS open, applied to discovery rather than to the cipher JSON.
 
+## CoCo integration (user stories)
+
+End-to-end CoCo usage (existing disk vs dynamic PVC, Trustee key IDs, YAML, CSI/CDH/Kata boundaries) is drafted for review in:
+
+- [docs/coco-user-story.zh.md](docs/coco-user-story.zh.md)（中文主文档）
+- [docs/coco-user-story.md](docs/coco-user-story.md)
+- Example manifests: [docs/examples/coco-csi/](docs/examples/coco-csi/)
+
+Local GPT demo tool: [demo/README.md](demo/README.md).
+
+CSI / guest-components / kata-containers code changes are intentionally **not** started until that user-story doc is approved.
+
 ## AI Helped
 
 The Data collection and most word work are helped with AI. But the core idea, the basic logic as following are enforced by human being.

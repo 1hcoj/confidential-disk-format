@@ -44,7 +44,7 @@
 | 对明文头做 MAC | [Trail of Bits (2025-10-30)](https://blog.trailofbits.com/2025/10/30/vulnerabilities-in-luks2-disk-encryption-for-confidential-vms/)；[tdx-init v0.2.0](https://github.com/flashbots/tdx-init)；[CDH #1648](https://github.com/confidential-containers/guest-components/pull/1648) | 认证打开契约。两个先例都是对明文头做 MAC，而不是加密它 |
 | fail-closed 重开；解锁失败不 format | [CDH #1648](https://github.com/confidential-containers/guest-components/pull/1648) | 已有卷不能变成 from-scratch |
 | 持久 LUKS 的带日志 integrity | [CDH #1663](https://github.com/confidential-containers/guest-components/pull/1663) | **唯一**的机密 RW profile：加密永不脱离完整性单独提供（§5） |
-| 密钥定位符**不放**在盘上 | [libcryptsetup-token-kbs](https://github.com/MatiasVara/libcryptsetup-token-kbs)（优先用 SMBIOS 的 `initdata.toml` 而不是盘上字段）；[Kata #13638](https://github.com/kata-containers/kata-containers/issues/13638)（manifest URI 由被度量的 policy 授权） | §6.2：镜像带身份，部署带定位符 |
+| 密钥定位符：部署优先，盘上可选提示 | [libcryptsetup-token-kbs](https://github.com/MatiasVara/libcryptsetup-token-kbs)；[Kata #13638](https://github.com/kata-containers/kata-containers/issues/13638) | §6.2：盘上身份；定位符以部署为准，可选 MAC 覆盖的 `key_locator` 提示 |
 | HKDF 拆根密钥 | 常规 KDF（[HKDF / RFC 5869](https://www.rfc-editor.org/rfc/rfc5869)） | `K_mac` 不能靠解析不可信 LUKS 头得来 |
 | 元数据代号计数器 | 常规的元数据版本化做法 | 拒绝在同一 `K_mac` 下被贴回来的旧 Contract（§8.4） |
 
@@ -153,6 +153,7 @@ mac = HMAC-SHA-256( K_mac,
   "volume_uuid": "<与 superblock 相同>",
   "meta_generation": 1,
   "profile": "plain" | "crypt+integrity" | "verity" | "verity+crypt",
+  "key_locator": "<可选；例如 kbs:///default/cdf/orders-db>",
   "data": {
     "luks2_header_b64": "<分离的 LUKS2 头，若 profile 使用 LUKS>",
     "luks2_subsystem": "cdf-v1",
@@ -171,9 +172,9 @@ mac = HMAC-SHA-256( K_mac,
 
 `profile` 含 `verity` 时必须有 `verity`。含 `crypt` 时必须有 `luks2_header_b64`。MAC 通过后，`volume_uuid` 和 `meta_generation` 必须与 superblock 一致（这两个字段刻意重复一遍，好让只读 JSON 的解析器不会和二进制头脱节）。
 
-**Contract 里不得包含任何秘密。** 这是一条规范性约束，不是一句观察：正因为如此，用 MAC 才够。将来某个版本若确实需要携带秘密字段，必须另定义一个加密扩展，而不是塞进这里。
+**Contract 里不得包含任何秘密。** 这是一条规范性约束，不是一句观察：正因为如此，用 MAC 才够。将来某个版本若确实需要携带秘密字段，必须另定义一个加密扩展，而不是塞进这里。`key_locator` 是公开的 URI / 资源路径，不是秘密。
 
-**盘上没有密钥定位符。** 这里刻意没有 `kbs_uri` 字段，理由见 §6.2。
+**可选 `key_locator`。** 存在时它是**部署提示**（典型值为 `kbs://…` 资源 id），与其它 Contract 字段一样被 MAC 覆盖。若打开方已从部署侧拿到定位符，则盘上字段**不具权威性**。解析顺序见 §6.2。
 
 ### 4.3 数据和 verity 分区
 
@@ -245,35 +246,50 @@ LUKS2      口令 / key-file 是 K_luks   -- 不是裸 K_root，也不是从盘�
 
 `K_luks` 是一把均匀随机的 256 位密钥，不是人类口令。由此有两个推论：明文公开 LUKS2 头不会让 keyslot 面临离线猜测攻击；keyslot 的 KDF 加固也不承担安全职责（它保护的是低熵口令，而 CDF 不使用低熵口令）。
 
-### 6.2 密钥获取走带外
+### 6.2 密钥获取与定位符解析
 
-**镜像不说明自己的密钥从哪来。** 它携带卷的*身份*（`volume_uuid`），定位符由部署侧携带。打开方以 `volume_uuid` 为索引，从可信通道取得 `K_root`：
+镜像始终携带卷的*身份*（`volume_uuid`）。Contract 里**可以**带可选的、非秘密的 `key_locator` 提示（§4.2）。部署侧**可以**带外提供定位符。打开方取得的是 **`K_root` 字节**（从不把 URI 当成卷密钥本身）。
+
+**解析顺序（必须）：**
+
+```text
+1. 若部署侧提供了定位符，用之
+   （CoCo：PVC 注解 > StorageClass 参数 > 静态 PV attribute；
+    被度量的 Init-Data / 所有者配置等）
+2. 否则若 Contract.key_locator 存在且非空，用之
+3. 否则拒绝（没有定位符）
+```
+
+部署侧定位符**始终覆盖**盘上字段。因此只改 Kubernetes 里的 KBS 路径时，**不必**改写 Contract。
 
 | 通道 | 例子 |
 |------|------|
-| 被度量的 guest 配置 | CoCo Init-Data（`cdh.toml`）、SMBIOS OEM 字符串里的 `initdata.toml`（[`kbs` token 插件](https://github.com/MatiasVara/libcryptsetup-token-kbs)本身就优先用这个而不是盘上字段） |
-| 被度量的编排策略 | 由被度量的 Agent policy 授权的 Trustee manifest 引用（[Kata #13638](https://github.com/kata-containers/kata-containers/issues/13638)） |
-| CoCo 存储链路 | StorageClass / CSI 路径里的 `kbs-key-id` |
-| CVM 所有者 | 所有者在启动时给的 key file 或 KMS 引用 |
+| CoCo 存储链路 | PVC / StorageClass / PV 上的 `kbs-key-id`（优先于盘） |
+| 被度量的 guest 配置 | CoCo Init-Data（`cdh.toml`）、SMBIOS OEM 字符串 |
+| 被度量的编排策略 | Trustee manifest 引用（[Kata #13638](https://github.com/kata-containers/kata-containers/issues/13638)） |
+| 盘上 Contract | 可选 `key_locator` 提示（仅当部署未提供时使用） |
+| CVM 所有者 | 启动时给的 key file 或 KMS 引用 |
 
-定位符不该放在镜像上，有三个理由：
+**信任。** 凡用于*取* `K_root` 的定位符，都在 MAC 能校验之前被消费——包括 `Contract.key_locator` 和 CSI 下发的 URI。这可以接受：错误的或攻击者挑的密钥只会导致 MAC 失败、拒绝打开，而不是错误地打开。MAC 通过后，Contract（含 `key_locator`）才被认证；在意的部署仍可比对预期 locator 或 `volume_uuid`。
 
-1. **它来不及被认证。** 定位符是在拿到任何密钥**之前**就需要的，所以它必然在尚未验证的状态下被消费。把它放在攻击者可写的介质上，打开方无论如何都得拿一份可信清单去核对——而那一刻，可信清单才是真正的来源，盘上那份只多贡献了一个「不一致怎么办」的分支。
-2. **解释字节不需要它。** 算法、布局、完整性配置、verity 根，这些是镜像的属性；密钥由哪个服务保管，是环境的属性。
-3. **它把镜像绑死在一个部署上。** 否则一旦密钥服务换地址，或镜像要在环境间搬动，就得改写被认证的元数据、为一次「路由变更」白烧一代。
+盘上字段只是**提示**、不能当唯一来源的理由：
 
-交给 volume 的永远是 **密钥字节**（`K_luks`），不是 URI。KBS 宜只在请求匹配 `(attestation, volume_uuid)` 时释放 `K_root`。`K_root` 是每卷一个的长期秘密，本格式**不**在打开时轮换它；轮换是管理操作（§8.4）。
+1. **部署必须能覆盖**，且不必为此烧掉 `meta_generation`（换 KBS、跨集群）。
+2. **解释数据面不需要定位符**；一旦有 `K_root`，`volume_uuid` + profile + 头就够。
+3. **耦合。** 只靠盘上字段会在密钥服务改路径时逼你改 Contract；「可选提示 + 部署覆盖」既方便独立 CVM 自描述打开，又适合 CoCo。
+
+KBS 宜只在请求符合部署策略（证明，以及可选的 `volume_uuid`）时释放 `K_root`。`K_root` 是每卷一个的长期秘密，本格式**不**在打开时轮换它；轮换是管理操作（§8.4）。
 
 打开方输入的可信程度：
 
 | 通道 | 提供什么 | 信任 |
 |------|----------|------|
-| MAC 校验前的 Superblock + Contract | 用于查密钥的 `volume_uuid`；其余字段仅供展示 | **不可信** |
-| 被度量的 CoCo / CVM 配置 | 定位符，或直接给 `K_root` | 被度量则可信 |
+| MAC 校验前的 Superblock + Contract | `volume_uuid`；可选 `key_locator` 作取钥提示 | **不可信** |
+| 部署侧定位符（CSI / 被度量配置） | 定位符（覆盖盘上） | 传输默认不可信，除非被度量；正确性靠随后 MAC |
 | KBS | `K_root` | 证明之后可信 |
 | MAC 校验后的 Superblock + Contract | 整份打开契约 | 可信 |
 
-校验前读 `volume_uuid` 是安全的：host 若把它换掉，打开方就会去要另一把密钥、派生出错的 `K_mac`，随后 MAC 校验失败——因为 `volume_uuid` 就在 MAC 输入里。失败模式是「拒绝打开」，不是「错误地打开」。已经知道预期 `volume_uuid` 的部署，宜先比对再往下走。
+校验前读 `volume_uuid` 是安全的：host 若把它换掉，打开方会在错误身份下取钥/派生，随后 MAC 失败。失败模式是「拒绝打开」，不是「错误地打开」。已经知道预期 `volume_uuid` 的部署，宜先比对再往下走。
 
 ---
 
@@ -413,7 +429,7 @@ mount -o ro /dev/mapper/cdf-data /mnt/data                     # 只有第 2 步
                          cryptsetup --header H_ram
 ```
 
-定位符来自上面两条路径中存在的那一条；镜像永远不提供它（§6.2）。CoCo 仍可以把 `kbs-key-id` 放在 CSI 元数据里——那是不可信传输，之所以可以接受，是因为随后的 MAC 会证明这把密钥是对的：错误的或攻击者挑的密钥只会导致校验失败、拒绝打开。手里只有盘的 CVM 需要所有者给出定位符或 `K_root`；单靠一张盘是不够的，这是刻意的。
+定位符：部署侧有则用部署侧，否则可用可选的 `Contract.key_locator`（§6.2）。CoCo CSI 的 `kbs-key-id` **覆盖**盘上提示。两条通道在 MAC 通过前都不可信——错误或攻击者挑的密钥只会导致拒绝打开。无带外定位符的 CVM 可以只靠盘上提示打开。
 
 ---
 
@@ -439,12 +455,12 @@ mount -o ro /dev/mapper/cdf-data /mnt/data                     # 只有第 2 步
 
 1. 使用 §4.1 的 GPT type UUID。
 2. 用 HKDF 得到的 `K_mac` 做 HMAC-SHA-256 认证 Contract，覆盖范围是「`mac` 置零的 Superblock」后接「恰好 `contract_size` 字节的 Contract」，并用常数时间比较。
-3. 在比较成功之前，除了用于查密钥的 `volume_uuid`，不使用 Contract 的任何字段。
+3. 在比较成功之前，不把 Contract 的任何字段用于 device-mapper 决策。MAC 校验前只可读 `volume_uuid` 以及（若需要）`key_locator`，且仅用于取得 `K_root`。
 4. 只用校验通过的 Contract 里的头做 `--header` 打开 LUKS2。
 5. 即使 MAC 通过，也拒绝空算法 / 非白名单 cipher，并拒绝任何「只加密不做完整性」的 `profile`（§5）。
 6. 除 §8.2 外永不 format，且绝不因为校验失败而 format。
 7. 「必须被认证」和「只读还是读写」取自部署侧，而不是镜像。
-8. 盘上不存密钥定位符（§6.2）。
+8. 将 `key_locator` 视为可选且非秘密；任何部署侧定位符优先于盘上字段（§6.2）；从不把定位符当成密钥材料。
 9. Contract 里不放秘密（§4.2）。
 10. 每次改写 Contract 都递增 `meta_generation`，且从不递减。
 

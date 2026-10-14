@@ -56,6 +56,10 @@ First positional argument is always the disk:
 
 `--key` / `--key-file` supply `K_root` (never stored on the image).
 
+Optional `--key-locator <uri>` writes a non-secret `Contract.key_locator` hint
+(e.g. `kbs:///default/cdf/orders-db`). Deployments (CSI / CDH) override it when
+they supply their own locator.
+
 HKDF-SHA-256 (design §6.1):
 
 ```text

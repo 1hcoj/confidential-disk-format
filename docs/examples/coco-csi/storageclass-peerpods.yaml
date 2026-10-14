@@ -1,0 +1,27 @@
+# PeerPods StorageClass (S3 static + S4 dynamic share this name).
+# Provider parameters mirror caa-csi-block-driver (AWS example).
+# Switch cdf.cloud-provider / params for azure or libvirt.
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: cdf-crypt-integrity-peerpods
+provisioner: cdf.csi.confidentialcontainers.org
+reclaimPolicy: Delete
+volumeBindingMode: WaitForFirstConsumer
+allowVolumeExpansion: false
+parameters:
+  cdf.platform: "peer-pods"
+  cdf.cloud-provider: "aws"
+  cdf.profile: "crypt+integrity"
+  cdf.fstype: "ext4"
+  cdf.kbs-key-id: "kbs:///default/cdf/my-pvc-key"
+  cdf.mkfs-if-empty: "true"
+  # Cloud provider params (same shape as caa-csi-block-driver):
+  awsRegion: "us-east-2"
+  awsAvailabilityZone: "us-east-2c"
+  awsVolumeType: "gp3"
+  # Azure example (when cdf.cloud-provider=azure):
+  # azureSubscriptionId: "<AZURE_SUBSCRIPTION_ID>"
+  # azureResourceGroup: "<AZURE_RESOURCE_GROUP>"
+  # azureLocation: "eastus"
+  # azureDiskSKU: "StandardSSD_LRS"

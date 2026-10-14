@@ -1,0 +1,22 @@
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: cdf-crypt-integrity
+provisioner: cdf.csi.confidentialcontainers.org
+# Dynamic PVs inherit this. Static PVs set reclaimPolicy on the PV object itself
+# (scenario1 uses Retain there), so one SC can serve both flows.
+reclaimPolicy: Delete
+volumeBindingMode: WaitForFirstConsumer
+allowVolumeExpansion: false
+parameters:
+  # bare-metal | peer-pods — selects NodePublish / hot-plug path
+  cdf.platform: "bare-metal"
+  cdf.profile: "crypt+integrity"
+  cdf.fstype: "ext4"
+  # Default full URI for dynamic CreateVolume; PVC annotation may override.
+  # Static PVs usually set cdf.kbs-key-id on the PV (and may ignore this default).
+  cdf.kbs-key-id: "kbs:///default/cdf/my-pvc-key"
+  cdf.volume-dir: "/var/lib/cdf-csi/volumes"
+  cdf.backend: "file"
+  cdf.mkfs-if-empty: "true"
+  # Do NOT set cdf.access-mode: rw/ro is implied by cdf.profile.

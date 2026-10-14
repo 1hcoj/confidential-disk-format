@@ -1,0 +1,41 @@
+# PeerPods pre-provision: bind an already-existing cloud disk by id.
+# CSI NodePublish writes mountInfo; CAA attaches to PodVM (not the worker).
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: cdf-s3-pv
+spec:
+  capacity:
+    storage: 1Gi
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: cdf-crypt-integrity-peerpods
+  csi:
+    driver: cdf.csi.confidentialcontainers.org
+    volumeHandle: cdf-s3-static
+    fsType: ext4
+    volumeAttributes:
+      cdf.platform: "peer-pods"
+      cdf.cloud-provider: "aws" # aws | azure | libvirt
+      cdf.cloud-volume-id: "REPLACE_CLOUD_VOLUME_ID" # e.g. vol-0abc… or Azure disk resource ID
+      cdf.profile: "crypt+integrity"
+      cdf.kbs-key-id: "kbs:///default/cdf/orders-db"
+      # Optional CDH check after the disk appears in the PodVM:
+      # cdf.expected-volume-uuid: "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+      cdf.mkfs-if-empty: "false"
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: cdf-s3-pvc
+  annotations:
+    cdf.confidentialcontainers.org/kbs-key-id: "kbs:///default/cdf/orders-db"
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+  storageClassName: cdf-crypt-integrity-peerpods
+  volumeName: cdf-s3-pv

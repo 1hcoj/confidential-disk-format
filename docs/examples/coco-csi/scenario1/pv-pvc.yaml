@@ -1,0 +1,49 @@
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: cdf-s1-pv
+spec:
+  # Declarative capacity for scheduler/PVC matching. Must be ≤ actual file/block size;
+  # CSI NodePublish validates host-path size (see user-story FAQ).
+  capacity:
+    storage: 1Gi
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: cdf-crypt-integrity
+  # Required for file+loop: pin the PV to the node that actually has the image.
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: kubernetes.io/hostname
+              operator: In
+              values:
+                - REPLACE_NODE_NAME
+  csi:
+    driver: cdf.csi.confidentialcontainers.org
+    volumeHandle: cdf-s1-static
+    fsType: ext4
+    volumeAttributes:
+      cdf.platform: "bare-metal"
+      cdf.host-path: "REPLACE_HOST_PATH"
+      cdf.profile: "crypt+integrity"
+      cdf.kbs-key-id: "kbs:///default/cdf/orders-db"
+      # Optional: CDH refuses open if Superblock.volume_uuid differs
+      # cdf.expected-volume-uuid: "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+      cdf.mkfs-if-empty: "false"
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: cdf-s1-pvc
+  annotations:
+    cdf.confidentialcontainers.org/kbs-key-id: "kbs:///default/cdf/orders-db"
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+  storageClassName: cdf-crypt-integrity
+  volumeName: cdf-s1-pv

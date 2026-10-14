@@ -94,6 +94,9 @@ pub struct Contract {
     pub volume_uuid: Uuid,
     pub meta_generation: u64,
     pub profile: Profile,
+    /// Optional non-secret key locator hint (e.g. kbs:///…). Deployment overrides.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub key_locator: Option<String>,
     pub data: ContractData,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub verity: Option<ContractVerity>,
@@ -271,6 +274,7 @@ pub fn seal_meta(
     k_mac: &MacKey,
     luks_header: Option<&[u8]>,
     verity: Option<ContractVerity>,
+    key_locator: Option<String>,
 ) -> Result<(Superblock, Contract)> {
     let mut flags = FLAG_INITIALIZED;
     if profile.is_authenticated() {
@@ -286,11 +290,21 @@ pub fn seal_meta(
         "none"
     };
 
+    let key_locator = key_locator.and_then(|s| {
+        let t = s.trim().to_string();
+        if t.is_empty() {
+            None
+        } else {
+            Some(t)
+        }
+    });
+
     let contract = Contract {
         format: "cdf/v1".into(),
         volume_uuid,
         meta_generation: 1,
         profile,
+        key_locator,
         data: ContractData {
             luks2_header_b64: luks_header.map(|h| B64.encode(h)),
             luks2_subsystem: "cdf-v1".into(),

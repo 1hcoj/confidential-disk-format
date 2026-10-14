@@ -44,7 +44,7 @@ No surveyed format satisfies all of them. In the survey's taxonomy ([§5](../inv
 | MAC over the header, cleartext header | [Trail of Bits (2025-10-30)](https://blog.trailofbits.com/2025/10/30/vulnerabilities-in-luks2-disk-encryption-for-confidential-vms/); [tdx-init v0.2.0](https://github.com/flashbots/tdx-init); [CDH #1648](https://github.com/confidential-containers/guest-components/pull/1648) | Authenticate the open contract. Both precedents MAC a cleartext header rather than encrypting it |
 | Fail-closed reopen; no format-on-unlock-failure | [CDH #1648](https://github.com/confidential-containers/guest-components/pull/1648) | Existing volumes must not become from-scratch |
 | Journaled integrity for persistent LUKS | [CDH #1663](https://github.com/confidential-containers/guest-components/pull/1663) | The **only** confidential RW profile: encryption is never offered without integrity (§5) |
-| Key locator kept **off** the image | [libcryptsetup-token-kbs](https://github.com/MatiasVara/libcryptsetup-token-kbs) (SMBIOS `initdata.toml` preferred over on-disk fields); [Kata #13638](https://github.com/kata-containers/kata-containers/issues/13638) (manifest URI in measured policy) | §6.2: the image carries identity, the deployment carries the locator |
+| Key locator: deployment first, optional on-disk hint | [libcryptsetup-token-kbs](https://github.com/MatiasVara/libcryptsetup-token-kbs); [Kata #13638](https://github.com/kata-containers/kata-containers/issues/13638) | §6.2: identity on disk; locator from deployment, with optional MAC'd `key_locator` hint |
 | HKDF-split root key | Common KDF practice ([HKDF / RFC 5869](https://www.rfc-editor.org/rfc/rfc5869)) | `K_mac` must not be derived by parsing an untrusted LUKS header |
 | Metadata generation counter | Ordinary versioned-metadata practice | Reject a stale Contract re-pasted under the same `K_mac` (§8.4) |
 
@@ -153,6 +153,7 @@ Covering the whole superblock authenticates `volume_uuid`, `flags`, `meta_genera
   "volume_uuid": "<same as superblock>",
   "meta_generation": 1,
   "profile": "plain" | "crypt+integrity" | "verity" | "verity+crypt",
+  "key_locator": "<optional; e.g. kbs:///default/cdf/orders-db>",
   "data": {
     "luks2_header_b64": "<detached LUKS2 header, if profile uses LUKS>",
     "luks2_subsystem": "cdf-v1",
@@ -171,9 +172,9 @@ Covering the whole superblock authenticates `volume_uuid`, `flags`, `meta_genera
 
 `verity` is required iff `profile` contains `verity`. `luks2_header_b64` is required iff `profile` contains `crypt`. After the MAC verifies, `volume_uuid` and `meta_generation` MUST equal the superblock (they are duplicated so that a parser reading only the JSON cannot be desynchronised from the binary header).
 
-**The Contract MUST NOT contain a secret.** This is a normative constraint, not an observation: it is what makes a MAC sufficient. A future version that needs to carry a secret field must define an encrypted extension rather than putting it here.
+**The Contract MUST NOT contain a secret.** This is a normative constraint, not an observation: it is what makes a MAC sufficient. A future version that needs to carry a secret field must define an encrypted extension rather than putting it here. A `key_locator` is a public URI / resource path, not a secret.
 
-**No key locator on the image.** There is deliberately no `kbs_uri` field; see §6.2.
+**Optional `key_locator`.** When present it is a **deployment hint** (typical value: a `kbs://…` resource id), covered by the MAC like every other Contract field. It is **not** authoritative if the opener was given a locator by the deployment. Resolution order is defined in §6.2.
 
 ### 4.3 Data and verity partitions
 
@@ -245,35 +246,50 @@ LUKS2      passphrase / key-file is K_luks   -- not K_root raw, not a key parsed
 
 `K_luks` is a uniformly random 256-bit key, not a human passphrase. Two consequences: publishing the LUKS2 header in cleartext does not enable an offline guessing attack on the keyslot, and keyslot KDF hardening is not load-bearing (it protects low-entropy passphrases, which CDF does not use).
 
-### 6.2 Key acquisition is out of band
+### 6.2 Key acquisition and locator resolution
 
-**The image does not say where its key comes from.** It carries the volume's *identity* (`volume_uuid`); the deployment carries the *locator*. An opener obtains `K_root` from a trusted channel, keyed by `volume_uuid`:
+The image always carries the volume's *identity* (`volume_uuid`). It **MAY** also carry an optional non-secret `key_locator` hint in the Contract (§4.2). The deployment **MAY** supply a locator out of band. The opener obtains `K_root` as **key bytes** (never treating a URI as the volume key itself).
+
+**Resolution order (MUST):**
+
+```text
+1. Deployment-supplied locator, if present
+   (CoCo: PVC annotation > StorageClass parameter > static PV attribute;
+    measured Init-Data / owner config; etc.)
+2. Else Contract.key_locator, if present and non-empty
+3. Else refuse (no locator)
+```
+
+A deployment locator **always overrides** the on-disk field. Changing only the KBS path in Kubernetes therefore does **not** require rewriting the Contract.
 
 | Channel | Example |
 |---------|---------|
-| Measured guest config | CoCo Init-Data (`cdh.toml`), SMBIOS OEM strings carrying `initdata.toml` (the [`kbs` token plugin](https://github.com/MatiasVara/libcryptsetup-token-kbs) prefers this over on-disk fields) |
-| Measured orchestration policy | A Trustee manifest reference authorized by measured Agent policy ([Kata #13638](https://github.com/kata-containers/kata-containers/issues/13638)) |
-| CoCo storage plumbing | `kbs-key-id` in the StorageClass / CSI path |
-| CVM owner | A key file or KMS reference supplied by the owner at boot |
+| CoCo storage plumbing | `kbs-key-id` on PVC / StorageClass / PV (wins over disk) |
+| Measured guest config | CoCo Init-Data (`cdh.toml`), SMBIOS OEM strings |
+| Measured orchestration policy | Trustee manifest reference ([Kata #13638](https://github.com/kata-containers/kata-containers/issues/13638)) |
+| On-disk Contract | optional `key_locator` hint (used only if deployment omitted one) |
+| CVM owner | key file or KMS reference at boot |
 
-Three reasons the locator does not belong on the image:
+**Trust.** Any locator used to *fetch* `K_root` is consumed **before** the MAC can verify — including `Contract.key_locator` and CSI-provided URIs. That is acceptable because a wrong or attacker-chosen key yields a MAC failure and a refused open, not a wrong open. After the MAC verifies, the Contract (including `key_locator`) is authenticated; deployments that care may still compare an expected locator or `volume_uuid`.
 
-1. **It cannot be authenticated in time.** The locator is needed *before* any key is available, so it is necessarily consumed while still unverified. Putting it on an attacker-writable medium means the opener must cross-check it against a trusted list anyway — at which point the trusted list is the real source and the on-image copy only adds a mismatch case to handle.
-2. **It is not needed to interpret the bytes.** Cipher, layout, integrity profile, and verity root are properties of the image. Which key service holds the key is a property of the environment.
-3. **It couples the image to one deployment.** Re-homing the key service, or moving the image between environments, would otherwise require rewriting authenticated metadata and burning a generation for a routing change.
+Why the on-disk field is only a **hint**, not the sole source:
 
-The volume always receives **key bytes** (`K_luks`), never a URI. The KBS SHOULD release `K_root` only when the request matches `(attestation, volume_uuid)`. `K_root` is a per-volume secret and is **not** rotated by this format on open; rotation is an administrative operation (§8.4).
+1. **Deployment must be able to override** without burning `meta_generation` (re-home KBS, multi-cluster).
+2. **Interpreting the data plane does not require a locator**; `volume_uuid` + profile + headers suffice once `K_root` is known.
+3. **Coupling.** Relying only on the disk forces a Contract rewrite when the key service path changes; optional hint + override avoids that for CoCo while still letting a standalone CVM open a self-describing image.
+
+The KBS SHOULD release `K_root` only when the request matches the deployment policy (attestation, and optionally `volume_uuid`). `K_root` is a per-volume secret and is **not** rotated by this format on open; rotation is an administrative operation (§8.4).
 
 Trust of opener inputs:
 
 | Channel | What it supplies | Trust |
 |---------|------------------|--------|
-| Superblock + Contract, before MAC | `volume_uuid` to look the key up; everything else for display | **Untrusted** |
-| Measured CoCo / CVM config | locator, or `K_root` directly | Trusted if measured |
+| Superblock + Contract, before MAC | `volume_uuid`; optional `key_locator` as fetch hint | **Untrusted** |
+| Deployment locator (CSI / measured config) | locator (overrides disk) | Untrusted transport unless measured; correctness via MAC |
 | KBS | `K_root` | Trusted after attestation |
-| Superblock + Contract, after MAC | the whole open contract | Trusted |
+| Superblock + Contract, after MAC | whole open contract | Trusted |
 
-Reading `volume_uuid` before verification is safe: if the host substitutes it, the opener requests the wrong key, derives the wrong `K_mac`, and the MAC fails — because `volume_uuid` is inside the MAC input. The failure mode is a refused open, not a wrong open. A deployment that already knows the expected `volume_uuid` SHOULD compare it and refuse early.
+Reading `volume_uuid` before verification is safe: if the host substitutes it, the opener requests or derives under the wrong identity and the MAC fails. The failure mode is a refused open, not a wrong open. A deployment that already knows the expected `volume_uuid` SHOULD compare it and refuse early.
 
 ---
 
@@ -413,7 +429,7 @@ Rewriting is not part of the open path: opening a volume never changes `meta_gen
                          cryptsetup --header H_ram
 ```
 
-The locator comes from whichever of those two paths exists; the image never provides it (§6.2). CoCo MAY pass `kbs-key-id` in CSI metadata — that is untrusted transport, so it is acceptable only because the MAC afterwards proves the key was the right one: a wrong or attacker-chosen key yields a verification failure and a refused open. A CVM holding only the disk needs an owner-supplied locator or `K_root`; the disk alone is not sufficient, by design.
+The locator comes from the deployment when present; otherwise from optional `Contract.key_locator` (§6.2). CoCo CSI `kbs-key-id` overrides the on-disk hint. Either channel is untrusted until the MAC verifies — a wrong or attacker-chosen key yields a refused open. A CVM with no out-of-band locator MAY use the on-disk hint alone.
 
 ---
 
@@ -439,12 +455,12 @@ An implementation is CDF v1 conformant if it:
 
 1. Uses the GPT type UUIDs in §4.1.
 2. Authenticates the Contract with HMAC-SHA-256 under HKDF-derived `K_mac`, over the zero-`mac` Superblock followed by exactly `contract_size` Contract bytes, compared in constant time.
-3. Uses no field of the Contract before that comparison succeeds, apart from `volume_uuid` for the key lookup.
+3. Uses no field of the Contract before that comparison succeeds, apart from `volume_uuid` and, when needed to fetch `K_root`, optional `key_locator` as an untrusted hint (§6.2).
 4. Opens LUKS2 only via `--header` from the verified Contract.
 5. Refuses null / non-allow-listed ciphers even after the MAC verifies, and refuses any `profile` that encrypts without integrity (§5).
 6. Never formats except under §8.2, and never in response to a verification failure.
 7. Takes "must be authenticated" and "read-only vs read-write" from the deployment, not from the image.
-8. Stores no key locator on the image (§6.2).
+8. Treats `key_locator` as optional and non-secret; prefers any deployment-supplied locator over the on-disk field (§6.2); never uses a locator as if it were key material.
 9. Puts no secret in the Contract (§4.2).
 10. Increments `meta_generation` on every Contract rewrite and never decreases it.
 
