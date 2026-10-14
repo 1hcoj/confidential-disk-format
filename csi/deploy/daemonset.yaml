@@ -1,0 +1,157 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: cdf-csi
+  namespace: cdf-csi
+  labels:
+    app.kubernetes.io/name: cdf-csi
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: cdf-csi
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: cdf-csi
+    spec:
+      serviceAccountName: cdf-csi-provisioner
+      hostPID: true
+      containers:
+        - name: csi-provisioner
+          image: registry.k8s.io/sig-storage/csi-provisioner:v3.6.0
+          args:
+            - -v=3
+            - --csi-address=/csi/csi.sock
+            - --feature-gates=Topology=true
+            - --node-deployment=true
+            - --strict-topology=true
+            - --immediate-topology=false
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          securityContext:
+            privileged: true
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /csi
+
+        - name: node-driver-registrar
+          image: registry.k8s.io/sig-storage/csi-node-driver-registrar:v2.9.0
+          args:
+            - --v=3
+            - --csi-address=/csi/csi.sock
+            - --kubelet-registration-path=/var/lib/kubelet/plugins/cdf.csi.confidentialcontainers.org/csi.sock
+          env:
+            - name: KUBE_NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          securityContext:
+            privileged: true
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /csi
+            - name: registration-dir
+              mountPath: /registration
+
+        - name: liveness-probe
+          image: registry.k8s.io/sig-storage/livenessprobe:v2.8.0
+          args:
+            - --csi-address=/csi/csi.sock
+            - --health-port=9898
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /csi
+
+        - name: cdf-csi
+          # Build with: make image REGISTRY=localhost TAG=dev
+          image: localhost/cdf-csi:dev
+          imagePullPolicy: IfNotPresent
+          args:
+            - --endpoint=unix:///csi/csi.sock
+            - --nodeid=$(NODE_NAME)
+            - --statedir=/var/lib/cdf-csi/state
+            - --volume-dir=/var/lib/cdf-csi/volumes
+            - --v=4
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            # Map kbs:///… URIs to files under this directory (see README).
+            - name: CDF_PROVISION_KEY_DIR
+              value: /var/lib/cdf-csi/provision-keys
+            - name: CDF_GPT_BIN
+              value: /usr/local/bin/cdf-gpt
+          securityContext:
+            privileged: true
+          ports:
+            - containerPort: 9898
+              name: healthz
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: healthz
+            initialDelaySeconds: 10
+            periodSeconds: 5
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /csi
+            - name: kubelet-dir
+              mountPath: /var/lib/kubelet
+              mountPropagation: Bidirectional
+            - name: cdf-volumes
+              mountPath: /var/lib/cdf-csi/volumes
+            - name: cdf-state
+              mountPath: /var/lib/cdf-csi/state
+            - name: provision-keys
+              mountPath: /var/lib/cdf-csi/provision-keys
+              readOnly: true
+            - name: direct-volumes
+              mountPath: /run/kata-containers/shared/direct-volumes
+            - name: dev
+              mountPath: /dev
+            # Host-built cdf-gpt from demo/ (adjust hostPath below).
+            - name: cdf-gpt-bin
+              mountPath: /usr/local/bin/cdf-gpt
+              readOnly: true
+
+      volumes:
+        - name: socket-dir
+          hostPath:
+            path: /var/lib/kubelet/plugins/cdf.csi.confidentialcontainers.org
+            type: DirectoryOrCreate
+        - name: registration-dir
+          hostPath:
+            path: /var/lib/kubelet/plugins_registry
+            type: Directory
+        - name: kubelet-dir
+          hostPath:
+            path: /var/lib/kubelet
+            type: Directory
+        - name: cdf-volumes
+          hostPath:
+            path: /var/lib/cdf-csi/volumes
+            type: DirectoryOrCreate
+        - name: cdf-state
+          hostPath:
+            path: /var/lib/cdf-csi/state
+            type: DirectoryOrCreate
+        - name: provision-keys
+          hostPath:
+            path: /var/lib/cdf-csi/provision-keys
+            type: DirectoryOrCreate
+        - name: direct-volumes
+          hostPath:
+            path: /run/kata-containers/shared/direct-volumes
+            type: DirectoryOrCreate
+        - name: dev
+          hostPath:
+            path: /dev
+            type: Directory
+        - name: cdf-gpt-bin
+          hostPath:
+            path: /usr/local/bin/cdf-gpt
+            type: File
