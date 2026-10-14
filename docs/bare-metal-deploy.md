@@ -8,7 +8,7 @@ This guide assumes you already have a **CoCo bare-metal** cluster (Kata + CDH in
 |------|--------|-----|
 | `guest-components` | `feat/cdf-volume-type` | `21508a703103dd77e5a8f9ebc62fb719b75a1de3` |
 | `kata-containers` | `feat/cdf-volume-type` | `18d7693afd12b8b210e5d4b12e1df923ae027bb9` |
-| `confidential-disk-format` | `main` | `6a23b05f39d9b8c739f79627886aac1800f83b0f` (+ follow-up untracking `csi/bin`) |
+| `confidential-disk-format` | `main` | `6cbef98e64e400e39ab23b3eadd76cbb9eb1727d` (CSI + this guide) |
 
 ---
 
