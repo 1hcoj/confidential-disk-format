@@ -1,14 +1,9 @@
-mod device;
-mod format;
-mod gpt_layout;
-mod keys;
 mod ops;
 
 use anyhow::Result;
+use cdf::Profile;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
-
-use format::Profile;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -16,7 +11,8 @@ use format::Profile;
     about = "CDF v1 GPT demo tool: info / create / open",
     long_about = "Stateless helper for the GPT-based Confidential Disk Format (see design/README.md).\n\
 \n\
-State machine:\n  S0 (raw) --create[--force]--> S1 (sealed CDF) --open--> S2 (mapped)\n\
+State machine:\n  S0 (blank) --create--> S1 (sealed CDF) --open--> S2 (mapped)\n\
+Non-blank disks are only re-created with --force.\n\
 Pass a disk image file (losetup) or a block device path."
 )]
 struct Cli {
@@ -38,7 +34,7 @@ enum Cmd {
         #[arg(long)]
         key_file: Option<String>,
     },
-    /// Initialize a CDF volume (GPT + seal). Refuses if already CDF unless --force.
+    /// Initialize a CDF volume (GPT + seal). Refuses non-blank disks unless --force.
     Create {
         /// plain | crypt+integrity | verity | verity+crypt
         #[arg(long)]
@@ -50,7 +46,7 @@ enum Cmd {
         key: Option<String>,
         #[arg(long)]
         key_file: Option<String>,
-        /// Re-format even if the disk already looks like CDF.
+        /// Re-format even if the disk is not blank (existing CDF or other content).
         #[arg(long)]
         force: bool,
         /// Final payload image for verity / verity+crypt (copied into P_data before seal).
@@ -60,6 +56,10 @@ enum Cmd {
         /// Deployment-supplied locators always override this field.
         #[arg(long)]
         key_locator: Option<String>,
+        /// Create an ext4 filesystem on the data device before sealing
+        /// (plain / crypt+integrity). Volumes are never formatted on open.
+        #[arg(long)]
+        mkfs: bool,
     },
     /// Open a sealed CDF volume (verify MAC, map to dm). Never formats.
     Open {
@@ -89,6 +89,7 @@ fn main() -> Result<()> {
             force,
             from_image,
             key_locator,
+            mkfs,
         } => ops::cmd_create(ops::CreateArgs {
             disk: cli.disk,
             profile: Profile::parse(&profile)?,
@@ -98,6 +99,7 @@ fn main() -> Result<()> {
             force,
             from_image,
             key_locator,
+            mkfs,
         }),
         Cmd::Open {
             key,
