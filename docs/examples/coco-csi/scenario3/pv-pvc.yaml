@@ -23,7 +23,6 @@ spec:
       cdf.kbs-key-id: "kbs:///default/cdf/orders-db"
       # Optional CDH check after the disk appears in the PodVM:
       # cdf.expected-volume-uuid: "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
-      cdf.mkfs-if-empty: "false"
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim

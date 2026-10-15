@@ -60,8 +60,11 @@ Guest 侧（四场景相同）一旦块设备进 VM：
 ```text
 mountInfo.json (volume-type=cdf, metadata…)
   → kata-agent → CDH SecureMount(volume_type=cdf)
-  → 解析 locator（部署 > 盘上 key_locator）
-  → 取 K_root → HKDF(volume_uuid) → MAC → mapper → mkfs? → mount
+  → 探测裸盘：空盘 / 已 seal 的 CDF / 其它内容
+  → 空盘：rootfs 策略允许该 locator 创建 → 取 K_root → GPT + LUKS2 + mkfs → 最后写元数据
+  → CDF：解析 locator（部署 > 盘上 key_locator）→ 取 K_root → HKDF(volume_uuid) → MAC
+         → 策略检查 volume_uuid → mapper → mount（open 路径从不 mkfs）
+  → 其它内容：拒绝，不覆盖
 ```
 
 ---
@@ -70,14 +73,14 @@ mountInfo.json (volume-type=cdf, metadata…)
 
 ```text
  Key Manager / 用户                CSI (本仓)
-  预先写入 K_root ──kbs URI──►  CreateVolume: 按 URI 取 K_root 字节并 seal
+  预先写入 K_root ──kbs URI──►  CreateVolume: 只分配空的稀疏文件（host 不持 K_root）
   （CSI 不创建密钥）              NodePublish: losetup + DirectVolume MountInfo
                                         │
                                         ▼
                                kata-runtime / kata-agent
                                         │ SecureMount volume_type=cdf
                                         ▼
-                               CDH: 证明后按同一 URI 取 K_root → open → mkfs? → mount
+                               CDH: 证明后按 URI 取 K_root → 空盘按策略 create / 否则 open → mount
                                         │
                                         ▼
                                      Trustee/KBS
@@ -86,9 +89,10 @@ mountInfo.json (volume-type=cdf, metadata…)
 | 组件 | 仓库 | 做什么 | 不做什么 |
 |------|------|--------|----------|
 | **cdf-gpt** | 本仓 `demo/` | 离线 create / info / open | 集群控制面 |
-| **CDF CSI** | 本仓 `csi/` | 接受已有 `kbs-key-id`；S2 seal；文件+loop；写 MountInfo | **不**创建/注册 Trustee 密钥；不在 Node 上给业务容器做明文长期挂载 |
+| **cdf 库** | 本仓 `cdf/` | create / probe / inspect / verify / activate，cdf-gpt 与 CDH 共用 | — |
+| **CDF CSI** | 本仓 `csi/` | 接受已有 `kbs-key-id`；S2 分配空盘；文件+loop；写 MountInfo | **不**持有 K_root、不写 CDF 元数据；不创建/注册 Trustee 密钥 |
 | **kata-agent** | `../kata-containers` | `volume-type=cdf` → CDH | 不解析 CDF、不持钥 |
-| **CDH** | `../guest-components` | `volume_type=cdf`：验 MAC、open、必要时 mkfs、mount；部署 locator 空则回落 `Contract.key_locator` | MAC 失败不 format；不在 host 上打开 CDF |
+| **CDH** | `../guest-components` | `volume_type=cdf`：空盘按 `/etc/cdf/policy.json` 创建；已有卷验 MAC + 策略后 open、mount；部署 locator 空则回落 `Contract.key_locator` | open 路径从不 mkfs；MAC 失败或非 CDF 内容不 format |
 | **Key Manager** | 部署侧 | 独立生命周期管理 `K_root` 与 URI | — |
 
 与 ephemeral LUKS（`encryption_key=ephemeral`）路径分离，参数不混用。
@@ -122,15 +126,25 @@ sudo ./cdf-gpt ./disk-rw.img create \
 1. Key Manager 创建密钥 → kbs:///default/cdf/my-pvc-key   （已就绪）
 2. 用户创建 PVC，注解或 SC 参数带上该 URI
 3. CSI CreateVolume：
-     - 读取 URI（PVC > SC）
-     - 向 Key Manager/KBS 的「供给取钥」接口取 K_root 字节（主机侧凭证，非 TEE 证明）
-     - 随机 volume_uuid，cdf-gpt create seal 到 volume-dir 下文件
-     - 不写 Trustee
-4. Pod：guest 证明后用同一 URI 取 K_root → open →（无 FS 则）mkfs → mount
-5. Pod2：同样 open（不再 seal / 不再 mkfs）
+     - 读取 URI（PVC > SC），只作为非机密 locator 透传
+     - 在 volume-dir 下分配全零稀疏文件；不取钥、不 seal、不写 Trustee
+4. Pod1：guest 证明后用 URI 取 K_root；盘为空且策略允许 → GPT + LUKS2 + mkfs，最后 seal 元数据 → mount
+   （CDH 日志打印新 volume_uuid）
+5. Pod2：只 open（验 MAC，不再 create / mkfs）
+6. 运维把 volume_uuid 写入策略的 volume_uuids 绑定；此后盘被擦成空盘也会被拒绝而不是重建
 ```
 
-若供给取钥与 guest 证明取钥是两个 API，Key Manager 需保证二者返回同一 `K_root`。
+### 3.3 Guest 策略（MVP：rootfs 内 `/etc/cdf/policy.json`）
+
+```json
+{"volumes":[{"key_locator":"kbs:///default/cdf/my-pvc-key","allow_create":true,"volume_uuids":[],"profile":"crypt+integrity"}]}
+```
+
+- `allow_create` 且 `volume_uuids` 为空：空盘可被初始化一次（未绑定状态）。
+- `volume_uuids` 非空：只允许打开这些卷；空盘一律拒绝。
+- 未列出的 locator：可打开在其密钥下 MAC 通过的卷，但不能创建。
+- 迁移到其它 CoCo 部署：镜像 + K_root + volume_uuid，在目标策略中登记为已绑定。
+- 整盘回滚（用旧镜像替换）不在 MVP 范围内，需外部状态锚（如 KBS 插件）。
 
 ---
 
@@ -149,8 +163,7 @@ sudo ./cdf-gpt ./disk-rw.img create \
     "cdf.platform": "bare-metal",
     "cdf.profile": "crypt+integrity",
     "cdf.kbs-key-id": "kbs:///default/cdf/orders-db",
-    "cdf.expected-volume-uuid": "",
-    "cdf.mkfs-if-empty": "true"
+    "cdf.expected-volume-uuid": ""
   },
   "options": ["defaults"]
 }
@@ -169,8 +182,7 @@ sudo ./cdf-gpt ./disk-rw.img create \
     "cdf.cloud-volume-id": "vol-0abc123",
     "cdf.profile": "crypt+integrity",
     "cdf.kbs-key-id": "kbs:///default/cdf/orders-db",
-    "cdf.expected-volume-uuid": "",
-    "cdf.mkfs-if-empty": "false"
+    "cdf.expected-volume-uuid": ""
   },
   "options": ["defaults"]
 }
@@ -182,7 +194,6 @@ sudo ./cdf-gpt ./disk-rw.img create \
 | `cdf.profile` | 期望 profile；兼作 rw/ro（`crypt+integrity`/`plain`→rw，`verity*`→ro）。**不再单独传 access-mode** |
 | `cdf.kbs-key-id` | 完整 URI；空则 CDH 回落 `Contract.key_locator` |
 | `cdf.expected-volume-uuid` | 可选；**由 CDH 强制检查**（非空则必须等于盘上 UUID，否则拒开） |
-| `cdf.mkfs-if-empty` | guest 在 mapper 上无 FS 时是否 mkfs |
 | `cdf.cloud-*` | 仅 PeerPods |
 
 ### 4.2 CDH `volume_type=cdf`
@@ -194,27 +205,31 @@ kbsKeyId        = optional   # 部署 locator；空则用 Contract.key_locator
 expectedUuid    = optional   # 非空则与 Superblock.volume_uuid 比对，失败即拒
 expectedProfile = "crypt+integrity"
 filesystemType  = "ext4"
-mkfsIfEmpty     = "true"|"false"
 ```
 
 ```text
-1. GPT 发现分区
-2. 读 volume_uuid；若 expectedUuid 非空且不一致 → 拒绝
-3. locator := kbsKeyId 或 Contract.key_locator
-4. 取 K_root → HKDF → 验 MAC（失败不 format）
-5. 按 Contract.profile 激活（profile 已隐含 rw/ro）
-6. mkfsIfEmpty 且无 FS → mkfs
-7. mount（ro profile 用 ro）
+1. 探测裸盘（不经 dm-integrity）：
+   - 空盘：前 33 MiB 与末 1 MiB 全零，或 CDF 分区存在但 Superblock 全零（create 中断）
+   - CDF：CDF 分区 + 非零 Superblock
+   - 其它：拒绝，不覆盖
+2. 空盘：locator := kbsKeyId；策略须 allow_create 且未绑定 volume_uuids；
+   expectedUuid 非空 → 拒绝；profile 取自策略 → 取 K_root → create（mkfs 在 seal 前）
+3. 读 volume_uuid；若 expectedUuid 非空且不一致 → 拒绝
+4. locator := kbsKeyId 或 Contract.key_locator
+5. 取 K_root → HKDF → 验 MAC（失败不 format）
+6. 策略：volume_uuids 非空则必须包含该 uuid；profile 须一致
+7. 按 Contract.profile 激活（profile 已隐含 rw/ro）
+8. mount（ro profile 用 ro；失败不 mkfs）
 ```
 
 ### 4.3 边界
 
 | 步骤 | 谁做 |
 |------|------|
-| S0→S1 seal | `cdf-gpt` 或 CSI CreateVolume |
+| S0→S1 seal | guest CDH（空盘 + 策略允许），或受信机器上的 `cdf-gpt` |
 | S1→mapper | CDH open |
-| mapper→FS | CDH 按需 mkfs + mount |
-| MAC 失败 | 拒绝 |
+| mapper→FS | create 时 CDH mkfs；open 只 mount |
+| MAC 失败 / 非 CDF 内容 / 已绑定却为空盘 | 拒绝 |
 
 ---
 
@@ -244,8 +259,8 @@ kubectl apply -f examples/coco-csi/scenario1/
 2. SC 默认 `cdf.kbs-key-id`；PVC 注解可覆盖。  
 3. `kubectl apply` SC + PVC + pod1 → 写入；删 pod1 → pod2 读出。  
 
-CreateVolume：**不**生成密钥；按 URI 取已有 `K_root` → seal 文件镜像。  
-mkfs：首挂由 guest 完成。
+CreateVolume：**不**生成也**不**读取密钥，只分配空文件。  
+create（GPT + LUKS2 + mkfs + seal）：首挂由 guest CDH 按策略完成。
 
 清单：[`examples/coco-csi/scenario2/`](examples/coco-csi/scenario2/)。
 
@@ -270,7 +285,6 @@ cdf.cloud-provider: aws          # 或 azure / libvirt
 cdf.cloud-volume-id: "vol-0REPLACE"
 cdf.profile: crypt+integrity
 cdf.kbs-key-id: "kbs:///default/cdf/orders-db"
-cdf.mkfs-if-empty: "false"
 # runtimeClassName: kata-remote
 ```
 
@@ -285,7 +299,7 @@ cdf.mkfs-if-empty: "false"
 1. Key Manager 预先放好 `K_root` + URI。  
 2. StorageClass：`cdf.platform=peer-pods`，`cdf.cloud-provider=…`，以及 provider 参数（订阅/区域等，可与 caa-csi 同类参数共存或复用其 provider）。  
 3. `CreateVolume`：云 API **创建空盘** →（推荐）控制器临时 attach 到供给节点跑 `cdf-gpt create` seal → detach → 返回 PV（带新 `cloud-volume-id`）。  
-4. Pod：`kata-remote`；CAA 附加 → CDH open → 首挂 `mkfs-if-empty`。  
+4. Pod：`kata-remote`；CAA 附加 → CDH 首挂对空盘按策略 create，之后只 open。  
 5. Pod2：同一 PVC，仅 open。
 
 若第一期暂不做「临时 attach seal」，可文档化降级：CreateVolume 只建空云盘，guest 在空盘上做 **一次性** CDF initialize（仅当 `cdf.platform=peer-pods` 且 meta 全零且策略允许）——与裸金属「open 永不 format」分支不同，实现时需显式开关。
@@ -307,7 +321,6 @@ parameters:
   cdf.fstype: "ext4"
   cdf.kbs-key-id: "kbs:///default/cdf/my-pvc-key"
   cdf.volume-dir: "/var/lib/cdf-csi/volumes"
-  cdf.mkfs-if-empty: "true"
 ```
 
 PeerPods（S3/S4 共用）：[`examples/coco-csi/storageclass-peerpods.yaml`](examples/coco-csi/storageclass-peerpods.yaml)（`cdf.platform=peer-pods` + cloud provider 参数）。
@@ -332,7 +345,6 @@ volumeAttributes:
   cdf.host-path: "/var/lib/cdf-volumes/disk-rw.img"
   cdf.profile: "crypt+integrity"
   cdf.kbs-key-id: "kbs:///default/cdf/orders-db"
-  cdf.mkfs-if-empty: "false"
 ```
 
 ### 静态 PV（S3 PeerPods）
@@ -344,7 +356,6 @@ volumeAttributes:
   cdf.cloud-volume-id: "vol-0REPLACE"
   cdf.profile: "crypt+integrity"
   cdf.kbs-key-id: "kbs:///default/cdf/orders-db"
-  cdf.mkfs-if-empty: "false"
 ```
 
 ### Pod RuntimeClass
@@ -360,7 +371,7 @@ volumeAttributes:
 
 | 阶段 | 内容 | 仓库 |
 |------|------|------|
-| P1 | CDH `volume_type=cdf`（open、key_locator 回落、expectedUuid、mkfs-if-empty） | guest-components ← upstream/main |
+| P1 | CDH `volume_type=cdf`（空盘按策略 create、open、key_locator 回落、expectedUuid） | guest-components ← upstream/main |
 | P2 | kata-agent `volume-type=cdf` → SecureMount | kata-containers ← upstream/main |
 | P3 | 本仓 CSI：S1/S2（`cdf.platform=bare-metal`） | 本仓 `csi/` |
 | P4 | PeerPods：S3 预置 + S4 动态（复用/对接 [caa-csi-block-driver](https://github.com/confidential-devhub/caa-csi-block-driver) 热插） | 本仓 CSI + CAA 集成 |

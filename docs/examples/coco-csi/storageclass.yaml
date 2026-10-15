@@ -18,5 +18,4 @@ parameters:
   cdf.kbs-key-id: "kbs:///default/cdf/my-pvc-key"
   cdf.volume-dir: "/var/lib/cdf-csi/volumes"
   cdf.backend: "file"
-  cdf.mkfs-if-empty: "true"
   # Do NOT set cdf.access-mode: rw/ro is implied by cdf.profile.

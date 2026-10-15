@@ -114,13 +114,11 @@ make image TAG=dev          # Dockerfile → localhost/cdf-csi:dev
 On **each worker** (or bake into the DaemonSet hostPath mounts):
 
 ```bash
-sudo mkdir -p /var/lib/cdf-csi/volumes /var/lib/cdf-csi/provision-keys
-# For S2 CreateVolume: place raw 32-byte K_root (or passphrase) where the URI maps:
-#   kbs:///default/cdf/my-pvc-key
-#   → /var/lib/cdf-csi/provision-keys/default/cdf/my-pvc-key
-sudo mkdir -p /var/lib/cdf-csi/provision-keys/default/cdf
-sudo cp ./k_root.bin /var/lib/cdf-csi/provision-keys/default/cdf/my-pvc-key
+sudo mkdir -p /var/lib/cdf-csi/volumes
 ```
+
+No key material goes on the host. `CreateVolume` only allocates a blank
+sparse file; the guest CDH initializes it on first mount.
 
 Deploy:
 
@@ -128,20 +126,31 @@ Deploy:
 kubectl apply -f csi/deploy/namespace.yaml
 kubectl apply -f csi/deploy/rbac.yaml
 kubectl apply -f csi/deploy/csidriver.yaml
-# Ensure daemonset image + CDF_GPT_BIN=/usr/local/bin/cdf-gpt
 kubectl apply -f csi/deploy/daemonset.yaml
 kubectl apply -f docs/examples/coco-csi/storageclass.yaml
 
 kubectl -n cdf-csi-system get pods -o wide
 ```
 
-Trustee/KBS: register the **same** `K_root` bytes at the URI used in SC/PVC annotations so the **guest** can fetch after attestation (`cc_kbc`). Provisioning keys on the host are only for CSI `CreateVolume` seal.
+Trustee/KBS: register `K_root` at the URI used in SC/PVC annotations so the
+**guest** can fetch it after attestation (`cc_kbc`).
+
+Guest rootfs: add `/etc/cdf/policy.json` (see [`csi/README.md`](../csi/README.md#guest-policy)).
+A locator must have `"allow_create": true` and no `volume_uuids` before a
+blank disk is initialized for it. After first mount, take the `volume_uuid`
+from the CDH log (or `cdf-gpt <img> info`, no key needed) and list it under
+`volume_uuids` to bind the volume; from then on a wiped disk is refused
+rather than re-created.
 
 ---
 
 ## 3. E2E: Scenario 1 (pre-sealed disk)
 
-1. Create key and seal offline (on any machine with `cdf-gpt`):
+The disk may also be a blank file (`truncate -s 1G disk-rw.img`) if the
+policy allows creating for its locator; the guest then seals it on first
+mount. To pre-seal it instead, do so on a trusted machine (not the worker):
+
+1. Create key and seal offline (on any trusted machine with `cdf-gpt`):
 
 ```bash
 openssl rand -out k_root.bin 32
@@ -177,7 +186,7 @@ Expect: Pod `runtimeClassName: kata` → DirectVolume → agent CDH `volume_type
 
 1. Register `K_root` at `kbs:///default/cdf/my-pvc-key` in Trustee.
 
-2. Place the same key file for CSI provisioner on workers (see §2).
+2. Allow creation for that locator in the guest policy (see §2).
 
 3. Apply:
 
@@ -191,7 +200,8 @@ kubectl apply -f docs/examples/coco-csi/scenario2/pod2.yaml
 kubectl exec -it cdf-s2-pod2 -- cat /data/hello   # expect hello-s2
 ```
 
-`CreateVolume` seals under `/var/lib/cdf-csi/volumes`; guest only opens (mkfs-if-empty on first mount if needed).
+`CreateVolume` allocates a blank file under `/var/lib/cdf-csi/volumes`; pod1's
+CDH creates and seals the volume; pod2's CDH only opens it.
 
 ---
 
@@ -202,5 +212,7 @@ kubectl exec -it cdf-s2-pod2 -- cat /data/hello   # expect hello-s2
 | Agent mounts plain FS / fails open | Host runtime not updated; `mountInfo` missing `volume-type: cdf` |
 | CDH “unknown volume type” | Guest still on old `confidential-data-hub` |
 | MAC verification failed | Guest KBS URI ≠ seal key, or wrong key bytes |
-| CreateVolume seal fails | `cdf-gpt` missing on node; provision key path mismatch |
+| CreateVolume fails | StorageClass missing `cdf.kbs-key-id` |
+| “policy does not allow creating” | Blank disk under a locator without `allow_create`, or bound via `volume_uuids` (wiped volume) |
+| “neither blank nor CDF” | Disk has foreign content; CDH never overwrites it |
 | Loop device / NodePublish | CSI DaemonSet needs privileged + `/dev` + direct-volumes hostPath |

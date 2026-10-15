@@ -31,7 +31,6 @@ spec:
       cdf.kbs-key-id: "kbs:///default/cdf/orders-db"
       # Optional: CDH refuses open if Superblock.volume_uuid differs
       # cdf.expected-volume-uuid: "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
-      cdf.mkfs-if-empty: "false"
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim

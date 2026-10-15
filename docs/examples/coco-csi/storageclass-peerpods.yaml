@@ -15,7 +15,6 @@ parameters:
   cdf.profile: "crypt+integrity"
   cdf.fstype: "ext4"
   cdf.kbs-key-id: "kbs:///default/cdf/my-pvc-key"
-  cdf.mkfs-if-empty: "true"
   # Cloud provider params (same shape as caa-csi-block-driver):
   awsRegion: "us-east-2"
   awsAvailabilityZone: "us-east-2c"

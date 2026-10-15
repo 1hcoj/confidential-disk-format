@@ -21,5 +21,6 @@ kubectl delete pod cdf-s4-pod1
 kubectl apply -f pod2.yaml
 ```
 
-`CreateVolume` must return a PV with `cdf.cloud-volume-id` set. First mount may
-set `cdf.mkfs-if-empty=true` so CDH mkfs after open.
+`CreateVolume` must return a PV with `cdf.cloud-volume-id` set and a blank
+disk. On first mount CDH creates the CDF volume if the guest policy allows it
+for the locator; later mounts only open.
