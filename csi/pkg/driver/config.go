@@ -13,7 +13,6 @@ const (
 	ParamVolumeDir          = "cdf.volume-dir"
 	ParamHostPath           = "cdf.host-path"
 	ParamBackend            = "cdf.backend"
-	ParamMkfsIfEmpty        = "cdf.mkfs-if-empty"
 	ParamExpectedVolumeUUID = "cdf.expected-volume-uuid"
 
 	PlatformBareMetal = "bare-metal"

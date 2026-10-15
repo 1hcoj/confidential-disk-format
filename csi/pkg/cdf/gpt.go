@@ -8,39 +8,24 @@ import (
 	"os"
 	"os/exec"
 	"strings"
-
-	"k8s.io/apimachinery/pkg/api/resource"
 )
 
-const EnvGptBin = "CDF_GPT_BIN"
-
-func GptBin() string {
-	if v := strings.TrimSpace(os.Getenv(EnvGptBin)); v != "" {
-		return v
+// AllocateBlankImage creates a new all-zero (sparse) image file. The CDF
+// layout is written later by the guest CDH, which holds K_root; the host only
+// ever hands over a blank disk.
+func AllocateBlankImage(imagePath string, sizeBytes int64) error {
+	f, err := os.OpenFile(imagePath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return fmt.Errorf("create %s: %w", imagePath, err)
 	}
-	return "cdf-gpt"
-}
-
-func CreateVolumeImage(bin, imagePath, profile, keyFile, keyLocator string, sizeBytes int64) error {
-	sizeQty := resource.NewQuantity(sizeBytes, resource.BinarySI)
-	sizeArg := sizeQty.String()
-
-	args := []string{
-		imagePath,
-		"create",
-		"--profile", profile,
-		"--size", sizeArg,
-		"--key-file", keyFile,
+	if err := f.Truncate(sizeBytes); err != nil {
+		f.Close()
+		_ = os.Remove(imagePath)
+		return fmt.Errorf("truncate %s to %d: %w", imagePath, sizeBytes, err)
 	}
-	if keyLocator != "" {
-		args = append(args, "--key-locator", keyLocator)
-	}
-
-	cmd := exec.Command(bin, args...)
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("cdf-gpt create: %w: %s", err, strings.TrimSpace(stderr.String()))
+	if err := f.Close(); err != nil {
+		_ = os.Remove(imagePath)
+		return fmt.Errorf("close %s: %w", imagePath, err)
 	}
 	return nil
 }

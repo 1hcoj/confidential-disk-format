@@ -52,18 +52,18 @@ func (d *Driver) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequest)
 		return nil, status.Errorf(codes.Internal, "mkdir volume dir: %v", err)
 	}
 
-	keyFile, err := cdfpkg.ResolveProvisionKeyFile(params)
-	if err != nil {
-		return nil, status.Errorf(codes.InvalidArgument, "provision key: %v", err)
+	// The guest needs a locator to fetch K_root and initialize the blank disk.
+	if cdfpkg.ResolveKbsKeyID(params) == "" {
+		return nil, status.Errorf(codes.InvalidArgument, "missing key locator: set %q or %q",
+			cdfpkg.ParamKbsKeyID, cdfpkg.AnnotationKbsKeyID)
 	}
 
 	volumeID := uuid.NewString()
 	hostPath := filepath.Join(volDir, volumeID+".img")
 
 	profile := profileFrom(params)
-	keyLocator := cdfpkg.ResolveKbsKeyID(params)
-	if err := cdfpkg.CreateVolumeImage(cdfpkg.GptBin(), hostPath, profile, keyFile, keyLocator, size); err != nil {
-		return nil, status.Errorf(codes.Internal, "seal volume: %v", err)
+	if err := cdfpkg.AllocateBlankImage(hostPath, size); err != nil {
+		return nil, status.Errorf(codes.Internal, "allocate volume: %v", err)
 	}
 
 	volCtx := mergeVolumeContext(params)

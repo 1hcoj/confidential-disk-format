@@ -60,7 +60,7 @@ spec:
           image: registry.k8s.io/sig-storage/livenessprobe:v2.8.0
           args:
             - --csi-address=/csi/csi.sock
-            - --health-port=9898
+            - --health-port=9808
           volumeMounts:
             - name: socket-dir
               mountPath: /csi
@@ -80,15 +80,12 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: spec.nodeName
-            # Map kbs:///… URIs to files under this directory (see README).
-            - name: CDF_PROVISION_KEY_DIR
-              value: /var/lib/cdf-csi/provision-keys
-            - name: CDF_GPT_BIN
-              value: /usr/local/bin/cdf-gpt
           securityContext:
             privileged: true
+          # Served by the liveness-probe sidecar (CSI Probe RPC); the pod shares
+          # one network namespace, so it must not reuse the driver's :9898.
           ports:
-            - containerPort: 9898
+            - containerPort: 9808
               name: healthz
           livenessProbe:
             httpGet:
@@ -106,17 +103,10 @@ spec:
               mountPath: /var/lib/cdf-csi/volumes
             - name: cdf-state
               mountPath: /var/lib/cdf-csi/state
-            - name: provision-keys
-              mountPath: /var/lib/cdf-csi/provision-keys
-              readOnly: true
             - name: direct-volumes
               mountPath: /run/kata-containers/shared/direct-volumes
             - name: dev
               mountPath: /dev
-            # Host-built cdf-gpt from demo/ (adjust hostPath below).
-            - name: cdf-gpt-bin
-              mountPath: /usr/local/bin/cdf-gpt
-              readOnly: true
 
       volumes:
         - name: socket-dir
@@ -139,10 +129,6 @@ spec:
           hostPath:
             path: /var/lib/cdf-csi/state
             type: DirectoryOrCreate
-        - name: provision-keys
-          hostPath:
-            path: /var/lib/cdf-csi/provision-keys
-            type: DirectoryOrCreate
         - name: direct-volumes
           hostPath:
             path: /run/kata-containers/shared/direct-volumes
@@ -151,7 +137,3 @@ spec:
           hostPath:
             path: /dev
             type: Directory
-        - name: cdf-gpt-bin
-          hostPath:
-            path: /usr/local/bin/cdf-gpt
-            type: File

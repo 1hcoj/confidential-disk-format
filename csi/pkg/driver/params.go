@@ -50,7 +50,6 @@ func publishMetadata(ctx map[string]string) map[string]string {
 		ParamProfile,
 		cdfpkg.ParamKbsKeyID,
 		ParamExpectedVolumeUUID,
-		ParamMkfsIfEmpty,
 	}
 	meta := make(map[string]string)
 	for _, k := range keys {
